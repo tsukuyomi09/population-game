@@ -12,6 +12,8 @@ export function WorldMap() {
   const drawRef = useRef<DrawController>(null);
   const [isDrawReady, setIsDrawReady] = useState(false);
   const [isDrawing, setIsDrawing] = useState(false);
+  const [hasStarted, setHasStarted] = useState(false);
+  const [target, setTarget] = useState<number | null>(null);
 
   useEffect(() => {
     if (!mapContainer.current) return;
@@ -47,6 +49,37 @@ export function WorldMap() {
   const startDrawing = () => {
     drawRef.current?.startPolygonDrawing();
     setIsDrawing(true);
+  };
+
+  const startGame = async () => {
+    try {
+      const response = await fetch("/api/game/start", { method: "POST" });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(
+          `Game start failed (${response.status}): ${message || response.statusText}`,
+        );
+      }
+
+      const data = (await response.json()) as { target: number };
+
+      if (typeof data.target !== "number" || !Number.isFinite(data.target)) {
+        throw new Error("Game start returned an invalid target.");
+      }
+
+      setTarget(data.target);
+      setHasStarted(true);
+    } catch (error) {
+      console.error("Game start failed:", error);
+    }
+  };
+
+  const abandonGame = () => {
+    drawRef.current?.reset();
+    setIsDrawing(false);
+    setTarget(null);
+    setHasStarted(false);
   };
 
   const submitPolygons = async () => {
@@ -139,6 +172,81 @@ export function WorldMap() {
       >
         Submit
       </button>
+      {target !== null && (
+        <>
+          <div
+            style={{
+              position: "fixed",
+              top: 16,
+              left: "50%",
+              zIndex: 1,
+              padding: "8px 18px",
+              borderRadius: 8,
+              background: "rgba(0, 0, 0, 0.65)",
+              color: "white",
+              textAlign: "center",
+              transform: "translateX(-50%)",
+            }}
+          >
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.18em" }}>
+              TARGET
+            </div>
+            <div style={{ fontSize: 24, fontWeight: 800 }}>
+              {target.toLocaleString("en-US")}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={abandonGame}
+            style={{
+              position: "fixed",
+              top: 16,
+              right: 16,
+              zIndex: 1,
+              padding: "8px 12px",
+              border: "1px solid #777",
+              borderRadius: 4,
+              background: "white",
+              color: "black",
+              cursor: "pointer",
+            }}
+          >
+            ABANDON
+          </button>
+        </>
+      )}
+      {!hasStarted && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 10,
+            display: "grid",
+            placeItems: "center",
+            background: "rgba(0, 0, 0, 0.5)",
+          }}
+        >
+          <button
+            type="button"
+            onClick={startGame}
+            style={{
+              padding: "18px 48px",
+              border: "2px solid white",
+              borderRadius: 10,
+              background: "linear-gradient(180deg, #38bdf8, #0369a1)",
+              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.45)",
+              color: "white",
+              cursor: "pointer",
+              fontSize: 28,
+              fontWeight: 800,
+              letterSpacing: "0.18em",
+              textShadow: "0 2px 4px rgba(0, 0, 0, 0.35)",
+            }}
+          >
+            PLAY
+          </button>
+        </div>
+      )}
     </>
   );
 }

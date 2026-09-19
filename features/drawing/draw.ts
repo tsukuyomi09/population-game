@@ -31,6 +31,10 @@ export function createDraw({ map, onReady, onFinish }: CreateDrawOptions) {
     isDrawingPolygon() {
       return draw.getMode() === "polygon";
     },
+    reset() {
+      if (draw.getMode() !== "static") draw.setMode("static");
+      draw.clear();
+    },
     stop() {
       draw.off("finish", finishDrawing);
       draw.stop();
