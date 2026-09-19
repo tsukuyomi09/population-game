@@ -14,6 +14,8 @@ export function WorldMap() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [hasStarted, setHasStarted] = useState(false);
   const [target, setTarget] = useState<number | null>(null);
+  const [populationResponse, setPopulationResponse] =
+    useState<PopulationResponse | null>(null);
 
   useEffect(() => {
     if (!mapContainer.current) return;
@@ -68,6 +70,7 @@ export function WorldMap() {
         throw new Error("Game start returned an invalid target.");
       }
 
+      setPopulationResponse(null);
       setTarget(data.target);
       setHasStarted(true);
     } catch (error) {
@@ -78,6 +81,7 @@ export function WorldMap() {
   const abandonGame = () => {
     drawRef.current?.reset();
     setIsDrawing(false);
+    setPopulationResponse(null);
     setTarget(null);
     setHasStarted(false);
   };
@@ -120,6 +124,7 @@ export function WorldMap() {
 
       const populationResponse = (await response.json()) as PopulationResponse;
 
+      setPopulationResponse(populationResponse);
       console.log("Population response:", populationResponse);
       populationResponse.results.forEach((result) => {
         console.log("Population result:", result);
@@ -129,6 +134,15 @@ export function WorldMap() {
       console.error("Population request failed:", error);
     }
   };
+
+  const score =
+    target !== null && populationResponse !== null
+      ? Math.max(
+          0,
+          100 -
+            (Math.abs(populationResponse.totalPopulation - target) / target) * 100,
+        )
+      : null;
 
   return (
     <>
@@ -214,6 +228,30 @@ export function WorldMap() {
             ABANDON
           </button>
         </>
+      )}
+      {populationResponse !== null && score !== null && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            zIndex: 1,
+            minWidth: 220,
+            padding: "16px 24px",
+            borderRadius: 8,
+            background: "rgba(0, 0, 0, 0.72)",
+            color: "white",
+            textAlign: "center",
+            transform: "translateX(-50%)",
+          }}
+        >
+          <div style={{ fontSize: 14 }}>Hai selezionato</div>
+          <div style={{ fontSize: 28, fontWeight: 800 }}>
+            {Math.round(populationResponse.totalPopulation).toLocaleString("en-US")}
+          </div>
+          <div style={{ marginTop: 12, fontSize: 14 }}>Score</div>
+          <div style={{ fontSize: 28, fontWeight: 800 }}>{score.toFixed(1)}%</div>
+        </div>
       )}
       {!hasStarted && (
         <div
