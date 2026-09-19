@@ -3,6 +3,7 @@ import type {
   PopulationResponse,
   PopulationShape,
 } from "../../../features/population/types";
+import { calculateWorldPopPopulation } from "../../../features/population/server/worldpop";
 
 function isPopulationShape(value: unknown): value is PopulationShape {
   if (typeof value !== "object" || value === null) return false;
@@ -46,10 +47,24 @@ export async function POST(request: Request) {
     );
   }
 
-  const response: PopulationResponse = {
-    results: shapes.map(({ id }) => ({ id, population: 0 })),
-    totalPopulation: 0,
-  };
+  try {
+    const results = [];
 
-  return Response.json(response);
+    for (const shape of shapes) {
+      const population = await calculateWorldPopPopulation(shape.geometry);
+      results.push({ id: shape.id, population });
+    }
+
+    const response: PopulationResponse = {
+      results,
+      totalPopulation: results.reduce((total, result) => total + result.population, 0),
+    };
+
+    return Response.json(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown WorldPop error.";
+    console.error("Population calculation failed:", error);
+
+    return Response.json({ error: message }, { status: 502 });
+  }
 }
