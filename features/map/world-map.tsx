@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import type { MapMouseEvent } from "maplibre-gl";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
+import type { PopulationRequest, PopulationResponse } from "../population/types";
 import { createMap } from "./map";
 
 export function WorldMap() {
@@ -48,7 +49,7 @@ export function WorldMap() {
     setIsDrawing(true);
   };
 
-  const submitPolygons = () => {
+  const submitPolygons = async () => {
     const draw = drawRef.current?.draw;
     const featureCollection = draw
       ? createPolygonFeatureCollection(draw)
@@ -56,6 +57,44 @@ export function WorldMap() {
 
     console.log(JSON.stringify(featureCollection, null, 2));
     console.log("Completed polygons:", featureCollection.features.length);
+
+    try {
+      const requestBody: PopulationRequest = {
+        shapes: featureCollection.features.map((feature) => {
+          if (feature.id === undefined) {
+            throw new Error("A completed polygon is missing an id.");
+          }
+
+          return {
+            id: feature.id,
+            geometry: feature.geometry,
+          };
+        }),
+      };
+
+      const response = await fetch("/api/population", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (!response.ok) {
+        const message = await response.text();
+        throw new Error(
+          `Population request failed (${response.status}): ${message || response.statusText}`,
+        );
+      }
+
+      const populationResponse = (await response.json()) as PopulationResponse;
+
+      console.log("Population response:", populationResponse);
+      populationResponse.results.forEach((result) => {
+        console.log("Population result:", result);
+      });
+      console.log("Total population:", populationResponse.totalPopulation);
+    } catch (error) {
+      console.error("Population request failed:", error);
+    }
   };
 
   return (
