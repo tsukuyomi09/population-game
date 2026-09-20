@@ -120,6 +120,25 @@ processing-open and exactextract time for every partial raster, total worker
 time, and total Next.js adapter time. These diagnostics travel over the worker's
 stderr stream and are never added to the public API response.
 
+## Calculation benchmark
+
+`tools/population/benchmark.py` is an isolated diagnostic and is not used by the
+provider. For each raster intersected by one polygon, it derives one canonical
+pixel window and benchmarks a raw window read, raw nodata-aware sum, Rasterio
+center and all-touched masks, and fractional exactextract. Work is streamed in
+bounded chunks. A window-limited exactextract raster source ensures the
+fractional path sees the same spatial window as the other methods.
+
+The bundled eight-country example can be run from the repository root with:
+
+```sh
+.venv-population/bin/python tools/population/benchmark.py
+```
+
+Use `--polygon PATH` to benchmark a saved GeoJSON Polygon, Feature, or original
+`/api/population` request payload. If the payload contains multiple shapes,
+select one with `--shape-id ID`.
+
 Local mode covers only the compatible country files currently present in the
 raster directory; it is not global coverage. The map does not constrain drawings
 to those countries, and areas outside discovered rasters and their valid-data
