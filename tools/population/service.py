@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 from queue import Queue
+import secrets
 import sys
 from threading import BoundedSemaphore
 from typing import Any, Callable
@@ -52,6 +53,7 @@ class PopulationServiceConfig:
     queue_size: int = DEFAULT_QUEUE_SIZE
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
+    auth_token: str | None = None
 
     @classmethod
     def from_environment(cls) -> PopulationServiceConfig:
@@ -89,6 +91,7 @@ class PopulationServiceConfig:
                 DEFAULT_MAX_REQUEST_BYTES,
                 1,
             ),
+            auth_token=os.environ.get("POPULATION_SERVICE_AUTH_TOKEN") or None,
         )
 
 
@@ -124,10 +127,12 @@ class PopulationServiceState:
         queue_size: int,
         retry_after_seconds: int,
         max_request_bytes: int,
+        auth_token: str | None = None,
     ) -> None:
         self.engine_pool = engine_pool
         self.retry_after_seconds = retry_after_seconds
         self.max_request_bytes = max_request_bytes
+        self.auth_token = auth_token
         engine_count = 0 if engine_pool is None else engine_pool.size
         self.capacity = engine_count + queue_size
         self._calculation_slots = BoundedSemaphore(max(1, self.capacity))
@@ -153,6 +158,13 @@ class PopulationServiceState:
             return self.engine_pool.calculate(shapes, method)
         finally:
             self._calculation_slots.release()
+
+    def is_authorized(self, authorization: str | None) -> bool:
+        if self.auth_token is None:
+            return True
+        if authorization is None:
+            return False
+        return secrets.compare_digest(authorization, f"Bearer {self.auth_token}")
 
 
 class PopulationHTTPServer(HTTPServer):
@@ -248,6 +260,13 @@ class PopulationRequestHandler(BaseHTTPRequestHandler):
         if self.path != "/v1/calculate":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
             return
+        if not self.server.state.is_authorized(self.headers.get("Authorization")):
+            self._send_json(
+                HTTPStatus.UNAUTHORIZED,
+                {"error": "Invalid or missing population service credentials."},
+                response_headers={"WWW-Authenticate": "Bearer"},
+            )
+            return
 
         try:
             payload = self._read_json_body()
@@ -310,6 +329,7 @@ class PopulationRequestHandler(BaseHTTPRequestHandler):
         status: HTTPStatus,
         payload: dict[str, Any],
         retry_after: int | None = None,
+        response_headers: dict[str, str] | None = None,
     ) -> None:
         body = json.dumps(payload, allow_nan=False, separators=(",", ":")).encode(
             "utf-8"
@@ -319,6 +339,8 @@ class PopulationRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         if retry_after is not None:
             self.send_header("Retry-After", str(retry_after))
+        for name, value in (response_headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
@@ -346,6 +368,7 @@ def create_population_server(
         config.queue_size,
         config.retry_after_seconds,
         config.max_request_bytes,
+        config.auth_token,
     )
     return PopulationHTTPServer((config.host, config.port), state)
 

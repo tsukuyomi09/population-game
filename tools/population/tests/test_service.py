@@ -118,12 +118,15 @@ class RunningServer:
         method: str,
         path: str,
         payload: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, dict[str, str], dict[str, Any]]:
         body = None if payload is None else json.dumps(payload)
-        headers = {} if body is None else {"Content-Type": "application/json"}
+        request_headers = dict(headers or {})
+        if body is not None:
+            request_headers["Content-Type"] = "application/json"
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
         try:
-            connection.request(method, path, body=body, headers=headers)
+            connection.request(method, path, body=body, headers=request_headers)
             response = connection.getresponse()
             response_body = json.loads(response.read())
             return response.status, dict(response.getheaders()), response_body
@@ -138,6 +141,7 @@ class PopulationServiceTests(unittest.TestCase):
         workers: int = 1,
         queue_size: int = 0,
         retry_after: int = 1,
+        auth_token: str | None = None,
     ) -> PopulationHTTPServer:
         config = PopulationServiceConfig(
             raster_source_path=Path("unused-rasters"),
@@ -147,6 +151,7 @@ class PopulationServiceTests(unittest.TestCase):
             engine_workers=workers,
             queue_size=queue_size,
             retry_after_seconds=retry_after,
+            auth_token=auth_token,
         )
         return create_population_server(
             config,
@@ -206,6 +211,33 @@ class PopulationServiceTests(unittest.TestCase):
                     )
 
         self.assertEqual(tracker.methods, ["fractional", "center"])
+
+    def test_calculate_requires_configured_bearer_token(self) -> None:
+        tracker = EngineTracker()
+        with RunningServer(
+            self.create_server(tracker, auth_token="service-secret")
+        ) as service:
+            unauthorized_status, unauthorized_headers, unauthorized_body = (
+                service.request(
+                    "POST",
+                    "/v1/calculate",
+                    {"method": "center", "shapes": [shape("unauthorized")]},
+                )
+            )
+            authorized_status, _, _ = service.request(
+                "POST",
+                "/v1/calculate",
+                {"method": "center", "shapes": [shape("authorized")]},
+                headers={"Authorization": "Bearer service-secret"},
+            )
+
+        self.assertEqual(unauthorized_status, 401)
+        self.assertEqual(unauthorized_headers["WWW-Authenticate"], "Bearer")
+        self.assertEqual(
+            unauthorized_body,
+            {"error": "Invalid or missing population service credentials."},
+        )
+        self.assertEqual(authorized_status, 200)
 
     def test_engine_concurrency_never_exceeds_worker_count(self) -> None:
         tracker = EngineTracker(blocked=True)

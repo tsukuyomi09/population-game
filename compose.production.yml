@@ -1,0 +1,62 @@
+name: worldrawing
+
+services:
+  population:
+    build:
+      context: .
+      dockerfile: deploy/population.Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      POPULATION_RASTER_PATH: /data/population
+      POPULATION_TILE_INDEX_PATH: /var/lib/worldrawing/tile-index
+      POPULATION_TILE_SIZE: ${POPULATION_TILE_SIZE:-512}
+      POPULATION_SERVICE_HOST: 0.0.0.0
+      POPULATION_SERVICE_PORT: 8001
+      POPULATION_SERVICE_WORKERS: ${POPULATION_SERVICE_WORKERS:-2}
+      POPULATION_SERVICE_QUEUE_SIZE: ${POPULATION_SERVICE_QUEUE_SIZE:-8}
+      POPULATION_SERVICE_RETRY_AFTER_SECONDS: ${POPULATION_SERVICE_RETRY_AFTER_SECONDS:-1}
+      POPULATION_SERVICE_MAX_REQUEST_BYTES: ${POPULATION_SERVICE_MAX_REQUEST_BYTES:-1000000}
+      POPULATION_SERVICE_AUTH_TOKEN: ${POPULATION_SERVICE_AUTH_TOKEN:?Set POPULATION_SERVICE_AUTH_TOKEN}
+    volumes:
+      - type: bind
+        source: ${POPULATION_RASTER_HOST_PATH:?Set POPULATION_RASTER_HOST_PATH}
+        target: /data/population
+        read_only: true
+      - type: volume
+        source: population-tile-index
+        target: /var/lib/worldrawing/tile-index
+    expose:
+      - "8001"
+    networks:
+      - backend
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      population:
+        condition: service_healthy
+        restart: true
+    environment:
+      NODE_ENV: production
+      POPULATION_PROVIDER: local
+      POPULATION_SERVICE_URL: ${POPULATION_SERVICE_URL:-http://population:8001}
+      POPULATION_SERVICE_AUTH_TOKEN: ${POPULATION_SERVICE_AUTH_TOKEN:?Set POPULATION_SERVICE_AUTH_TOKEN}
+      POPULATION_SERVICE_TIMEOUT_MS: ${POPULATION_SERVICE_TIMEOUT_MS:-120000}
+    ports:
+      - "${WORLDRAWING_BIND_ADDRESS:-127.0.0.1}:${WORLDRAWING_HTTP_PORT:-3000}:3000"
+    networks:
+      - frontend
+      - backend
+
+volumes:
+  population-tile-index:
+
+networks:
+  frontend:
+  backend:
+    internal: true
