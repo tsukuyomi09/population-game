@@ -38,3 +38,7 @@ next-env.d.ts
 
 # system files
 .DS_Store
+
+# Internal project/Codex context
+docs/project/
+docs/POPULATION_ENGINE.md
