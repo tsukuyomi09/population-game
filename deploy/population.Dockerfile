@@ -1,11 +1,27 @@
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS dependencies
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends build-essential libgeos-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY tools/population/requirements.txt ./tools/population/requirements.txt
-RUN pip install --no-cache-dir --requirement tools/population/requirements.txt
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --no-cache-dir \
+        --requirement tools/population/requirements.txt
+
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH=/opt/venv/bin:$PATH
+
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libexpat1 libgeos-c1v5 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=dependencies /opt/venv /opt/venv
 
 COPY tools/population/engine.py tools/population/service.py tools/population/tile_index.py ./tools/population/
 
