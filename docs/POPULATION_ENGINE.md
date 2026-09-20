@@ -139,6 +139,35 @@ Use `--polygon PATH` to benchmark a saved GeoJSON Polygon, Feature, or original
 `/api/population` request payload. If the payload contains multiple shapes,
 select one with `--shape-id ID`.
 
+### Tiled preaggregation spike
+
+`tools/population/tiled_benchmark.py` prototypes raster-aligned tile totals
+without changing the provider. Generated indexes are written below the ignored
+`artifacts/population/tile-index/` directory. Tiles covered completely by the
+polygon contribute a nodata-aware precomputed sum; only intersecting boundary
+tiles use the original fractional exactextract operation against 100 m pixels.
+
+The bundled large-Europe polygon produced these results on the local eight-file
+dataset (full exactextract processed 546,975,410 pixels):
+
+| Tile size | Preprocess | Index | Total tiles | Inside | Boundary | Boundary pixels | Tiled runtime | Same-run speedup | Population difference |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 128 | 5.287 s | 204,597 B | 67,733 | 29,415 | 569 | 9,272,832 | 1.223 s | 6.65x | 0.000608 |
+| 256 | 4.137 s | 57,210 B | 17,082 | 7,395 | 286 | 18,583,808 | 0.571 s | 15.03x | 0.000610 |
+| 512 | 3.796 s | 17,191 B | 4,322 | 1,853 | 146 | 37,692,928 | 0.519 s | 15.75x | 0.000609 |
+
+The 512-pixel prototype was slightly faster than 256 despite processing more
+boundary pixels, showing that per-tile exactextract call overhead matters at
+this scale. The sub-0.001-person differences come from floating-point summation
+order; boundary pixels still use exact fractional coverage. These measurements
+are spike results, not a production tile-size or storage decision.
+
+Rebuild and run the requested 256-pixel benchmark with:
+
+```sh
+.venv-population/bin/python tools/population/tiled_benchmark.py --tile-size 256 --rebuild
+```
+
 Local mode covers only the compatible country files currently present in the
 raster directory; it is not global coverage. The map does not constrain drawings
 to those countries, and areas outside discovered rasters and their valid-data
