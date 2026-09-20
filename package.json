@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "predev": "node scripts/copy-maplibre-worker.mjs",
     "dev": "next dev",
+    "prebuild": "node scripts/copy-maplibre-worker.mjs",
     "build": "next build --webpack",
     "start": "next start",
     "test:population-adapter": "tsc --project features/population/server/tsconfig.test.json && node --test artifacts/population/adapter-tests/features/population/server/population-service-client.test.js"
@@ -13,7 +15,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.47.0",
-    "maplibre-gl": "^5.24.0",
+    "maplibre-gl": "^6.10.0",
     "next": "16.3.5",
     "react": "19.3.0",
     "react-dom": "19.3.0",

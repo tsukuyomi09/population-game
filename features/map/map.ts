@@ -1,15 +1,18 @@
-import { Map } from "maplibre-gl";
+import { Map, setWorkerUrl } from "maplibre-gl";
 
 export type MapProjection = "mercator" | "globe";
 
 export const DEFAULT_MAP_PROJECTION: MapProjection = "globe";
 
 export function createMap(container: HTMLElement) {
+  setWorkerUrl("/maplibre/maplibre-gl-worker.mjs");
+
   const map = new Map({
     container,
     center: [137.9150899566626, 36.25956997955441],
     zoom: 0,
     style: "https://tiles.openfreemap.org/styles/liberty",
+    zoomLevelsToOverscale: undefined,
   });
 
   map.on("style.load", () =>
