@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Map as MapLibreMap } from "maplibre-gl";
+import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
@@ -209,225 +211,119 @@ export function WorldMap() {
 
   return (
     <>
-      <main ref={mapContainer} style={{ width: "100vw", height: "100vh" }} />
-      <button
+      <main ref={mapContainer} className="h-screen w-screen" />
+      <Button
         type="button"
         onClick={submitPolygons}
         disabled={!isDrawReady || populationResponse !== null || isSubmitting}
-        style={{
-          position: "fixed",
-          top: 16,
-          left: 16,
-          zIndex: 1,
-          padding: "8px 12px",
-          border: "1px solid #777",
-          borderRadius: 4,
-          background: "white",
-          color: "black",
-          cursor:
-            isDrawReady && populationResponse === null && !isSubmitting
-              ? "pointer"
-              : "default",
-        }}
+        variant="outline"
+        className="fixed top-4 left-4 z-[1] h-auto cursor-pointer rounded-[4px] border-[#777] bg-white px-3 py-2 text-[13.3333px] font-normal text-black shadow-none hover:bg-white disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
       >
         Submit
-      </button>
+      </Button>
       <div
         role="group"
         aria-label="Map projection"
-        style={{
-          position: "fixed",
-          right: 16,
-          bottom: 16,
-          zIndex: 1,
-          display: "flex",
-          overflow: "hidden",
-          border: "1px solid #777",
-          borderRadius: 4,
-          background: "white",
-        }}
+        className="fixed right-4 bottom-4 z-[1] flex overflow-hidden rounded-[4px] border border-[#777] bg-white"
       >
         {(["mercator", "globe"] as const).map((option) => {
           const isActive = projection === option;
 
           return (
-            <button
+            <Button
               key={option}
               type="button"
               onClick={() => changeProjection(option)}
               disabled={!isDrawReady}
               aria-pressed={isActive}
-              style={{
-                padding: "7px 10px",
-                border: 0,
-                background: isActive ? "#111" : "white",
-                color: isActive ? "white" : "black",
-                cursor: isDrawReady ? "pointer" : "default",
-                fontSize: 11,
-                fontWeight: 700,
-              }}
+              variant="ghost"
+              className={cn(
+                "h-auto cursor-pointer rounded-none border-0 px-[10px] py-[7px] text-[11px] font-bold shadow-none disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100",
+                isActive
+                  ? "bg-[#111] text-white hover:bg-[#111] hover:text-white"
+                  : "bg-white text-black hover:bg-white hover:text-black",
+              )}
             >
               {option === "mercator" ? "2D" : "GLOBE"}
-            </button>
+            </Button>
           );
         })}
       </div>
       {target !== null && (
         <>
-          <div
-            style={{
-              position: "fixed",
-              top: 16,
-              left: "50%",
-              zIndex: 1,
-              padding: "8px 18px",
-              borderRadius: 8,
-              background: "rgba(0, 0, 0, 0.65)",
-              color: "white",
-              textAlign: "center",
-              transform: "translateX(-50%)",
-            }}
-          >
-            <div
-              style={{
-                marginBottom: 6,
-                fontSize: 11,
-                fontWeight: 700,
-                letterSpacing: "0.18em",
-              }}
-            >
+          <div className="fixed top-4 left-1/2 z-[1] -translate-x-1/2 rounded-[8px] bg-black/[0.65] px-[18px] py-2 text-center text-white">
+            <div className="mb-1.5 text-[11px] font-bold tracking-[0.18em]">
               ROUND {currentRound} / {ROUND_COUNT}
             </div>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.18em" }}>
+            <div className="text-[11px] font-bold tracking-[0.18em]">
               TARGET
             </div>
-            <div style={{ fontSize: 24, fontWeight: 800 }}>
+            <div className="text-2xl font-extrabold">
               {target.toLocaleString("en-US")}
             </div>
-            <div style={{ marginTop: 6, fontSize: 12 }}>
+            <div className="mt-1.5 text-xs">
               SCORE {accumulatedScore.toLocaleString("en-US")}
             </div>
           </div>
-          <button
+          <Button
             type="button"
             onClick={abandonGame}
-            style={{
-              position: "fixed",
-              top: 16,
-              right: 16,
-              zIndex: 1,
-              padding: "8px 12px",
-              border: "1px solid #777",
-              borderRadius: 4,
-              background: "white",
-              color: "black",
-              cursor: "pointer",
-            }}
+            variant="outline"
+            className="fixed top-4 right-4 z-[1] h-auto cursor-pointer rounded-[4px] border-[#777] bg-white px-3 py-2 text-[13.3333px] font-normal text-black shadow-none hover:bg-white"
           >
             ABANDON
-          </button>
+          </Button>
         </>
       )}
       {populationResponse !== null && currentRoundScore !== null && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 24,
-            left: "50%",
-            zIndex: 1,
-            minWidth: 220,
-            padding: "16px 24px",
-            borderRadius: 8,
-            background: "rgba(0, 0, 0, 0.72)",
-            color: "white",
-            textAlign: "center",
-            transform: "translateX(-50%)",
-          }}
-        >
-          <div style={{ fontSize: 14 }}>Hai selezionato</div>
-          <div style={{ fontSize: 28, fontWeight: 800 }}>
+        <div className="fixed bottom-6 left-1/2 z-[1] min-w-[220px] -translate-x-1/2 rounded-[8px] bg-black/[0.72] px-6 py-4 text-center text-white">
+          <div className="text-sm">Hai selezionato</div>
+          <div className="text-[28px] font-extrabold">
             {Math.round(populationResponse.totalPopulation).toLocaleString("en-US")}
           </div>
-          <div style={{ marginTop: 12, fontSize: 14 }}>Round points</div>
-          <div style={{ fontSize: 28, fontWeight: 800 }}>
+          <div className="mt-3 text-sm">Round points</div>
+          <div className="text-[28px] font-extrabold">
             {currentRoundScore.toLocaleString("en-US")}
           </div>
           {currentRound < ROUND_COUNT ? (
-            <button
+            <Button
               type="button"
               onClick={nextRound}
               disabled={isTargetLoading}
-              style={{
-                marginTop: 16,
-                padding: "8px 16px",
-                border: "1px solid white",
-                borderRadius: 4,
-                background: "white",
-                color: "black",
-                cursor: isTargetLoading ? "default" : "pointer",
-                fontWeight: 700,
-              }}
+              variant="outline"
+              className="mt-4 h-auto cursor-pointer rounded-[4px] border-white bg-white px-4 py-2 font-bold text-black shadow-none hover:bg-white disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
             >
               NEXT ROUND
-            </button>
+            </Button>
           ) : (
             <>
-              <div style={{ marginTop: 12, fontSize: 14 }}>Final score</div>
-              <div style={{ fontSize: 28, fontWeight: 800 }}>
+              <div className="mt-3 text-sm">Final score</div>
+              <div className="text-[28px] font-extrabold">
                 {accumulatedScore.toLocaleString("en-US")} /{" "}
                 {MAX_GAME_SCORE.toLocaleString("en-US")}
               </div>
-              <button
+              <Button
                 type="button"
                 onClick={abandonGame}
-                style={{
-                  marginTop: 16,
-                  padding: "8px 16px",
-                  border: "1px solid white",
-                  borderRadius: 4,
-                  background: "white",
-                  color: "black",
-                  cursor: "pointer",
-                  fontWeight: 700,
-                }}
+                variant="outline"
+                className="mt-4 h-auto cursor-pointer rounded-[4px] border-white bg-white px-4 py-2 font-bold text-black shadow-none hover:bg-white"
               >
                 END GAME
-              </button>
+              </Button>
             </>
           )}
         </div>
       )}
       {!hasStarted && (
-        <div
-          style={{
-            position: "fixed",
-            inset: 0,
-            zIndex: 10,
-            display: "grid",
-            placeItems: "center",
-            background: "rgba(0, 0, 0, 0.5)",
-          }}
-        >
-          <button
+        <div className="fixed inset-0 z-10 grid place-items-center bg-black/50">
+          <Button
             type="button"
             onClick={startGame}
             disabled={isTargetLoading}
-            style={{
-              padding: "18px 48px",
-              border: "2px solid white",
-              borderRadius: 10,
-              background: "linear-gradient(180deg, #38bdf8, #0369a1)",
-              boxShadow: "0 8px 24px rgba(0, 0, 0, 0.45)",
-              color: "white",
-              cursor: isTargetLoading ? "default" : "pointer",
-              fontSize: 28,
-              fontWeight: 800,
-              letterSpacing: "0.18em",
-              textShadow: "0 2px 4px rgba(0, 0, 0, 0.35)",
-            }}
+            className="h-auto cursor-pointer rounded-[10px] border-2 border-white bg-[linear-gradient(180deg,#38bdf8,#0369a1)] px-12 py-[18px] text-[28px] font-extrabold tracking-[0.18em] text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.35)] shadow-[0_8px_24px_rgba(0,0,0,0.45)] hover:bg-[linear-gradient(180deg,#38bdf8,#0369a1)] disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
           >
             PLAY
-          </button>
+          </Button>
         </div>
       )}
     </>
