@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "Node20",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../../..",
+    "outDir": "../../../artifacts/population/adapter-tests"
+  },
+  "files": [
+    "population-service-client.test.ts",
+    "population-service-client.ts",
+    "calculation-mode.ts",
+    "../types.ts"
+  ]
+}
