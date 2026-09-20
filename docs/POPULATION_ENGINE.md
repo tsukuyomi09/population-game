@@ -66,6 +66,15 @@ POPULATION_RASTER_PATH=./data/population
 POPULATION_PYTHON_PATH=./.venv-population/bin/python
 ```
 
+Its optional tile settings default to:
+
+```text
+POPULATION_TILE_SIZE=512
+POPULATION_TILE_INDEX_PATH=./artifacts/population/tile-index
+```
+
+`POPULATION_TILE_INDEX_PATH` is a generated-index directory, not an index file.
+
 `POPULATION_RASTER_PATH` may point to the raster directory or, for backward
 compatibility, to one raster inside it. In both cases the worker scans that
 directory for files matching:
@@ -76,28 +85,33 @@ directory for files matching:
 
 Every discovered raster is validated and indexed by its geographic extent once
 per worker batch. Each submitted polygon is intersected with those extents using
-Shapely. Rasters with no intersection are skipped. The worker runs exactextract
-against each partially intersected raster and sums all raster contributions into
-the shape's single result. A polygon crossing Italy and Switzerland therefore
-uses both country rasters while preserving its original ID. Adding another
-compatible country requires only placing its matching file in the directory.
+Shapely, and rasters with no intersection are skipped. A polygon crossing
+country boundaries uses every intersected raster while preserving its original
+ID. Adding another compatible country requires only placing its matching file in
+the directory.
 
-The worker keeps a generated `.worldrawing-population-totals.json` sidecar in
-the raster directory. On a cache miss, it calculates each raster total with the
-same exactextract `sum(default_value=0)` operation over the raster's complete
-bounds, preserving the normal nodata behavior. Cache entries are invalidated by
-the raster's filename, byte size, and nanosecond modification time. The first
-request after adding or replacing rasters pays this one-time calculation cost;
-later worker processes reuse the totals.
+Fractional local requests use a generated gzip-compressed tile index shared with
+`tools/population/tiled_benchmark.py`. The default index contains a nodata-aware
+population total for every raster-aligned 512 by 512 pixel tile. A tile whose
+complete rectangular extent is covered by a polygon contributes its stored
+total. Tiles outside the polygon contribute zero. Only boundary tiles run
+exactextract against the original 100 m pixels, using
+`sum(default_value=0)` and the same fractional coverage semantics as before.
+Results from all tiles and country rasters are summed per submitted shape.
 
-If a submitted polygon covers a raster's complete rectangular extent, the
-worker adds that raster's cached total without running exactextract for that
-polygon/raster pair. This test is deliberately conservative: a polygon that
-covers all valid country pixels but not the raster's full bounding rectangle
-still follows the regular exactextract path. Partially intersected rasters are
-processed concurrently with a maximum of four threads (and never more threads
-than available CPUs or partial rasters). Every thread opens its own raster, and
-results are merged in raster discovery order to retain deterministic summation.
+The worker loads the index on each process. If it is missing, unreadable,
+malformed, or stale, the worker rebuilds all discovered raster entries before
+calculation. Staleness includes an index schema or tile-size change, any added or
+removed raster, or a raster filename, byte-size, or nanosecond-modification-time
+change. Rebuilds take an exclusive file lock on platforms supporting `fcntl`,
+recheck after acquiring the lock, write a process-specific temporary gzip file,
+and atomically replace the published index. Generated indexes stay under the
+Git-ignored `artifacts/population/` tree by default.
+
+Intersected rasters are processed concurrently with a maximum of four threads
+(and never more than available CPUs or selected rasters). Every thread opens its
+own raster. Boundary shapes sharing a tile are submitted to exactextract in one
+batch, and raster results are merged in discovery order.
 
 The local provider always invokes the worker with `--method fractional`. It
 checks that the raster source and worker are readable, enforces a worker timeout,
@@ -108,17 +122,17 @@ WorldPop.
 For a one-command local development start from the repository root:
 
 ```sh
-POPULATION_PROVIDER=local POPULATION_RASTER_PATH="$PWD/data/population" POPULATION_PYTHON_PATH="$PWD/.venv-population/bin/python" npm run dev
+POPULATION_PROVIDER=local POPULATION_RASTER_PATH="$PWD/data/population" POPULATION_PYTHON_PATH="$PWD/.venv-population/bin/python" POPULATION_TILE_SIZE=512 POPULATION_TILE_INDEX_PATH="$PWD/artifacts/population/tile-index" npm run dev
 ```
 
 Each successful local request writes one `[local-population timing]` block to
 the Next.js server log. It reports Python process startup, geospatial dependency
-imports, raster discovery, raster metadata/index creation, raster-total cache
-hits and misses, aggregate polygon/raster containment checks, rasters resolved
-by the full-containment fast path, concurrent partial-raster wall time,
-processing-open and exactextract time for every partial raster, total worker
-time, and total Next.js adapter time. These diagnostics travel over the worker's
-stderr stream and are never added to the public API response.
+imports, raster discovery, raster metadata indexing, tile-index loading or
+rebuilding, polygon/raster checks, concurrent raster wall time, per-raster tile
+classification and exactextract time, fully-inside and boundary tile counts,
+boundary pixels, total worker time, and total Next.js adapter time. These
+diagnostics travel over the worker's stderr stream and are never added to the
+public API response.
 
 ## Calculation benchmark
 
@@ -139,13 +153,14 @@ Use `--polygon PATH` to benchmark a saved GeoJSON Polygon, Feature, or original
 `/api/population` request payload. If the payload contains multiple shapes,
 select one with `--shape-id ID`.
 
-### Tiled preaggregation spike
+### Tiled validation and benchmark
 
-`tools/population/tiled_benchmark.py` prototypes raster-aligned tile totals
-without changing the provider. Generated indexes are written below the ignored
-`artifacts/population/tile-index/` directory. Tiles covered completely by the
-polygon contribute a nodata-aware precomputed sum; only intersecting boundary
-tiles use the original fractional exactextract operation against 100 m pixels.
+`tools/population/tiled_benchmark.py` is the standalone correctness and
+performance path for the same tile-index infrastructure used by the local
+provider. Generated indexes are written below the ignored
+`artifacts/population/tile-index/` directory. It calculates one polygon both
+with full-raster exactextract and with tiled preaggregation, then reports their
+population difference and timing.
 
 The bundled large-Europe polygon produced these results on the local eight-file
 dataset (full exactextract processed 546,975,410 pixels):
@@ -156,17 +171,20 @@ dataset (full exactextract processed 546,975,410 pixels):
 | 256 | 4.137 s | 57,210 B | 17,082 | 7,395 | 286 | 18,583,808 | 0.571 s | 15.03x | 0.000610 |
 | 512 | 3.796 s | 17,191 B | 4,322 | 1,853 | 146 | 37,692,928 | 0.519 s | 15.75x | 0.000609 |
 
-The 512-pixel prototype was slightly faster than 256 despite processing more
+The 512-pixel result was slightly faster than 256 despite processing more
 boundary pixels, showing that per-tile exactextract call overhead matters at
 this scale. The sub-0.001-person differences come from floating-point summation
-order; boundary pixels still use exact fractional coverage. These measurements
-are spike results, not a production tile-size or storage decision.
+order; boundary pixels still use exact fractional coverage. The local provider
+therefore defaults to 512-pixel tiles while global storage and deployment remain
+undecided.
 
-Rebuild and run the requested 256-pixel benchmark with:
+Compare the current 512-pixel tiled calculation with full exactextract using:
 
 ```sh
-.venv-population/bin/python tools/population/tiled_benchmark.py --tile-size 256 --rebuild
+POPULATION_RASTER_PATH="$PWD/data/population" .venv-population/bin/python tools/population/tiled_benchmark.py --tile-size 512 --index-root "$PWD/artifacts/population/tile-index"
 ```
+
+Add `--rebuild` to deliberately regenerate the index before comparing.
 
 Local mode covers only the compatible country files currently present in the
 raster directory; it is not global coverage. The map does not constrain drawings

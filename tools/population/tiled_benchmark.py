@@ -5,8 +5,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import gzip
-import json
 import math
 import os
 from pathlib import Path
@@ -18,16 +16,17 @@ from benchmark import (
     DEFAULT_POLYGON,
     DEFAULT_RASTER_DIRECTORY,
     benchmark_fractional,
-    discover_rasters,
     load_geometry,
-    masked_sum,
 )
-
-
-ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_INDEX_ROOT = ROOT / "artifacts" / "population" / "tile-index"
-INDEX_VERSION = 1
-DEFAULT_TILE_SIZE = 256
+from tile_index import (
+    DEFAULT_INDEX_ROOT,
+    DEFAULT_TILE_SIZE,
+    discover_raster_paths,
+    index_path,
+    load_index,
+    prepare_index,
+    tile_window,
+)
 
 
 @dataclass(frozen=True)
@@ -65,140 +64,6 @@ def parse_arguments() -> argparse.Namespace:
         help="Rebuild tile totals even when a compatible generated index exists.",
     )
     return parser.parse_args()
-
-
-def tile_window(
-    tile_row: int,
-    tile_column: int,
-    tile_size: int,
-    raster_width: int,
-    raster_height: int,
-    window_type: Any,
-) -> Any:
-    row_off = tile_row * tile_size
-    column_off = tile_column * tile_size
-    return window_type(
-        column_off,
-        row_off,
-        min(tile_size, raster_width - column_off),
-        min(tile_size, raster_height - row_off),
-    )
-
-
-def index_path(index_root: Path, tile_size: int) -> Path:
-    return index_root / f"population-tiles-{tile_size}.json.gz"
-
-
-def raster_fingerprint(path: Path) -> dict[str, int]:
-    stat = path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-
-
-def build_index(
-    raster_paths: list[Path],
-    output_path: Path,
-    tile_size: int,
-    rasterio: Any,
-    window_type: Any,
-) -> tuple[dict[str, Any], float]:
-    started_at = time.perf_counter()
-    rasters: dict[str, Any] = {}
-
-    for raster_path in raster_paths:
-        print(f"Preaggregating {raster_path.name}...", file=sys.stderr, flush=True)
-        with rasterio.open(raster_path) as raster:
-            if raster.count != 1 or raster.crs is None or raster.crs.to_epsg() != 4326:
-                raise ValueError(f"Expected a single-band EPSG:4326 raster: {raster_path}")
-            if raster.scales[0] != 1.0 or raster.offsets[0] != 0.0:
-                raise ValueError(f"Scaled rasters are not supported by this spike: {raster_path}")
-
-            tile_rows = math.ceil(raster.height / tile_size)
-            tile_columns = math.ceil(raster.width / tile_size)
-            totals: list[float] = []
-            for tile_row in range(tile_rows):
-                for tile_column in range(tile_columns):
-                    window = tile_window(
-                        tile_row,
-                        tile_column,
-                        tile_size,
-                        raster.width,
-                        raster.height,
-                        window_type,
-                    )
-                    totals.append(masked_sum(raster.read(1, window=window, masked=True)))
-
-            rasters[raster_path.name] = {
-                **raster_fingerprint(raster_path),
-                "width": raster.width,
-                "height": raster.height,
-                "tile_rows": tile_rows,
-                "tile_columns": tile_columns,
-                "totals": totals,
-            }
-
-    index = {
-        "version": INDEX_VERSION,
-        "tile_size": tile_size,
-        "rasters": rasters,
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = output_path.with_name(f"{output_path.name}.{os.getpid()}.tmp")
-    with gzip.open(temporary_path, "wt", encoding="utf-8", compresslevel=6) as index_file:
-        json.dump(index, index_file, allow_nan=False, separators=(",", ":"))
-    os.replace(temporary_path, output_path)
-    return index, time.perf_counter() - started_at
-
-
-def load_index(path: Path) -> dict[str, Any]:
-    with gzip.open(path, "rt", encoding="utf-8") as index_file:
-        index = json.load(index_file)
-    if not isinstance(index, dict) or not isinstance(index.get("rasters"), dict):
-        raise ValueError(f"Invalid generated tile index: {path}")
-    return index
-
-
-def index_is_current(
-    index: dict[str, Any],
-    raster_paths: list[Path],
-    tile_size: int,
-) -> bool:
-    if index.get("version") != INDEX_VERSION or index.get("tile_size") != tile_size:
-        return False
-    indexed_rasters = index.get("rasters")
-    if not isinstance(indexed_rasters, dict) or set(indexed_rasters) != {
-        path.name for path in raster_paths
-    }:
-        return False
-    for path in raster_paths:
-        entry = indexed_rasters.get(path.name)
-        if not isinstance(entry, dict):
-            return False
-        fingerprint = raster_fingerprint(path)
-        if entry.get("size") != fingerprint["size"] or entry.get("mtime_ns") != fingerprint["mtime_ns"]:
-            return False
-    return True
-
-
-def prepare_index(
-    raster_paths: list[Path],
-    output_path: Path,
-    tile_size: int,
-    rebuild: bool,
-    rasterio: Any,
-    window_type: Any,
-) -> tuple[dict[str, Any], float, bool]:
-    if not rebuild and output_path.is_file():
-        existing = load_index(output_path)
-        if index_is_current(existing, raster_paths, tile_size):
-            return existing, 0.0, False
-    index, seconds = build_index(
-        raster_paths,
-        output_path,
-        tile_size,
-        rasterio,
-        window_type,
-    )
-    return index, seconds, True
 
 
 def relevant_window(raster: Any, geometry: dict[str, Any], geometry_window: Any, window_error: Any) -> Any | None:
@@ -348,7 +213,7 @@ def main() -> int:
         polygon = shape(geometry)
         if polygon.is_empty or not polygon.is_valid:
             raise ValueError("The selected polygon must be non-empty and valid.")
-        raster_paths = discover_rasters(arguments.raster)
+        raster_paths = discover_raster_paths(arguments.raster)
         output_path = index_path(arguments.index_root.expanduser().resolve(), arguments.tile_size)
         tile_index, preprocessing_seconds, rebuilt = prepare_index(
             raster_paths,
