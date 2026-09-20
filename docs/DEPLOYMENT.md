@@ -4,6 +4,10 @@ Worldrawing's initial production foundation targets one Linux VPS running Docker
 Compose. It keeps the web and population runtimes separate so they can later be
 moved or scaled independently without changing the public population API.
 
+For Railway, use the two-service setup in [RAILWAY.md](./RAILWAY.md). The
+Railway path reuses the Dockerfiles below and does not replace this Compose
+workflow.
+
 ## Runtime structure
 
 ```text
