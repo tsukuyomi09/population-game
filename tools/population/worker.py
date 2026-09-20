@@ -5,14 +5,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 from pathlib import Path
 import sys
 import time
-from typing import Any
 
-from engine import METHODS, PopulationEngine, PopulationTimings
+from engine import METHODS, PopulationEngine, PopulationTimings, validate_shapes
 from tile_index import DEFAULT_INDEX_ROOT, DEFAULT_TILE_SIZE
 
 
@@ -49,58 +47,11 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def require_shape(value: Any, index: int) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError(f"Shape {index} must be an object.")
-
-    shape_id = value.get("id")
-    valid_id = (
-        isinstance(shape_id, str) and bool(shape_id)
-    ) or (
-        isinstance(shape_id, (int, float))
-        and not isinstance(shape_id, bool)
-        and math.isfinite(shape_id)
-    )
-    if not valid_id:
-        raise ValueError(f"Shape {index} has an invalid id.")
-
-    geometry = value.get("geometry")
-    if not isinstance(geometry, dict) or geometry.get("type") != "Polygon":
-        raise ValueError(f"Shape {index} must contain a GeoJSON Polygon.")
-
-    rings = geometry.get("coordinates")
-    if not isinstance(rings, list) or not rings:
-        raise ValueError(f"Shape {index} has no polygon rings.")
-
-    for ring_index, ring in enumerate(rings):
-        if not isinstance(ring, list) or len(ring) < 4:
-            raise ValueError(f"Shape {index} ring {ring_index} must have at least four positions.")
-        if ring[0] != ring[-1]:
-            raise ValueError(f"Shape {index} ring {ring_index} is not closed.")
-        for position in ring:
-            if not isinstance(position, list) or len(position) < 2:
-                raise ValueError(f"Shape {index} contains an invalid position.")
-            longitude, latitude = position[:2]
-            if (
-                not isinstance(longitude, (int, float))
-                or isinstance(longitude, bool)
-                or not math.isfinite(longitude)
-                or not -180 <= longitude <= 180
-                or not isinstance(latitude, (int, float))
-                or isinstance(latitude, bool)
-                or not math.isfinite(latitude)
-                or not -90 <= latitude <= 90
-            ):
-                raise ValueError(f"Shape {index} contains invalid WGS84 coordinates.")
-
-    return value
-
-
 def read_shapes() -> list[dict[str, Any]]:
     payload = json.load(sys.stdin)
     if not isinstance(payload, dict) or not isinstance(payload.get("shapes"), list):
         raise ValueError("Input must be a JSON object containing a shapes array.")
-    return [require_shape(shape, index) for index, shape in enumerate(payload["shapes"])]
+    return validate_shapes(payload["shapes"])
 
 
 def write_timing_report(timings: PopulationTimings) -> None:
