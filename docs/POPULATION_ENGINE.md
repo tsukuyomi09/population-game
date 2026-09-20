@@ -77,10 +77,27 @@ directory for files matching:
 Every discovered raster is validated and indexed by its geographic extent once
 per worker batch. Each submitted polygon is intersected with those extents using
 Shapely. Rasters with no intersection are skipped. The worker runs exactextract
-against each intersecting raster and sums those partial populations into the
-shape's single result. A polygon crossing Italy and Switzerland therefore uses
-both country rasters while preserving its original ID. Adding another compatible
-country requires only placing its matching file in the directory.
+against each partially intersected raster and sums all raster contributions into
+the shape's single result. A polygon crossing Italy and Switzerland therefore
+uses both country rasters while preserving its original ID. Adding another
+compatible country requires only placing its matching file in the directory.
+
+The worker keeps a generated `.worldrawing-population-totals.json` sidecar in
+the raster directory. On a cache miss, it calculates each raster total with the
+same exactextract `sum(default_value=0)` operation over the raster's complete
+bounds, preserving the normal nodata behavior. Cache entries are invalidated by
+the raster's filename, byte size, and nanosecond modification time. The first
+request after adding or replacing rasters pays this one-time calculation cost;
+later worker processes reuse the totals.
+
+If a submitted polygon covers a raster's complete rectangular extent, the
+worker adds that raster's cached total without running exactextract for that
+polygon/raster pair. This test is deliberately conservative: a polygon that
+covers all valid country pixels but not the raster's full bounding rectangle
+still follows the regular exactextract path. Partially intersected rasters are
+processed concurrently with a maximum of four threads (and never more threads
+than available CPUs or partial rasters). Every thread opens its own raster, and
+results are merged in raster discovery order to retain deterministic summation.
 
 The local provider always invokes the worker with `--method fractional`. It
 checks that the raster source and worker are readable, enforces a worker timeout,
@@ -96,17 +113,18 @@ POPULATION_PROVIDER=local POPULATION_RASTER_PATH="$PWD/data/population" POPULATI
 
 Each successful local request writes one `[local-population timing]` block to
 the Next.js server log. It reports Python process startup, geospatial dependency
-imports, raster discovery, raster metadata/index creation, aggregate
-polygon/raster intersection checks, processing-open and exactextract time for
-every selected raster, total worker time, and total Next.js adapter time. These
-diagnostics travel over the worker's stderr stream and are never added to the
-public API response.
+imports, raster discovery, raster metadata/index creation, raster-total cache
+hits and misses, aggregate polygon/raster containment checks, rasters resolved
+by the full-containment fast path, concurrent partial-raster wall time,
+processing-open and exactextract time for every partial raster, total worker
+time, and total Next.js adapter time. These diagnostics travel over the worker's
+stderr stream and are never added to the public API response.
 
-Local mode currently covers only Italy and Switzerland. The map does not
-constrain drawings to those countries. Areas outside the discovered rasters and
-their valid-data masks contribute zero, so gameplay testing must keep submitted
-shapes within Italy, Switzerland, or a crossing of their shared border.
+Local mode covers only the compatible country files currently present in the
+raster directory; it is not global coverage. The map does not constrain drawings
+to those countries, and areas outside discovered rasters and their valid-data
+masks contribute zero.
 
-The production process model, raster storage strategy, global tiling, caching,
-and large-area execution architecture remain intentionally undecided. This
-provider switch is only for limited-country gameplay testing.
+The production process model, raster storage strategy, global tiling and cache
+strategy, and large-area execution architecture remain intentionally undecided.
+This provider switch is only for limited-country gameplay testing.

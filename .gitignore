@@ -20,6 +20,7 @@
 *.vrt
 *.ovr
 *.aux.xml
+.worldrawing-population-totals.json
 *.gpkg
 *.shp
 *.shx
