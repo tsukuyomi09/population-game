@@ -13,15 +13,26 @@ The target boundary remains:
 frontend -> /api/population -> batch population provider -> dataset/service
 ```
 
-The public request and response contract does not change. Requests contain a
-`shapes` array of stable IDs and GeoJSON Polygons; responses contain one
+Requests contain the current round's positive `targetPopulation` and a `shapes`
+array of stable IDs and GeoJSON Polygons. Responses remain unchanged: one
 `{ id, population }` result per shape plus `totalPopulation`.
 
 ## Population rule
 
 Local validation established exact fractional coverage through exactextract as
-Worldrawing's population rule. Reproducing undocumented WorldPop API behavior
-for individual boundary pixels is not required.
+the reference population rule. Target-aware score-impact benchmarks also showed
+that center inclusion is effectively score-equivalent for high-target rounds.
+The local provider therefore uses this application-layer policy:
+
+```text
+targetPopulation < 20,000,000  -> fractional exactextract boundaries
+targetPopulation >= 20,000,000 -> pixel-center boundaries
+```
+
+The threshold is defined in `features/population/server/calculation-mode.ts`,
+not in the raster worker. The worker only implements the requested geospatial
+mode and has no knowledge of game targets or scoring. Reproducing undocumented
+WorldPop API behavior for individual boundary pixels is not required.
 
 Local gameplay testing currently uses compatible 2026 WorldPop Global2 rasters
 for Italy and Switzerland:
@@ -90,14 +101,15 @@ country boundaries uses every intersected raster while preserving its original
 ID. Adding another compatible country requires only placing its matching file in
 the directory.
 
-Fractional local requests use a generated gzip-compressed tile index shared with
+Local requests use a generated gzip-compressed tile index shared with
 `tools/population/tiled_benchmark.py`. The default index contains a nodata-aware
 population total for every raster-aligned 512 by 512 pixel tile. A tile whose
 complete rectangular extent is covered by a polygon contributes its stored
-total. Tiles outside the polygon contribute zero. Only boundary tiles run
-exactextract against the original 100 m pixels, using
-`sum(default_value=0)` and the same fractional coverage semantics as before.
-Results from all tiles and country rasters are summed per submitted shape.
+total in both modes. Tiles outside the polygon contribute zero. Fractional
+boundary tiles run exactextract against the original 100 m pixels using
+`sum(default_value=0)`; center boundary tiles use Rasterio's standard
+pixel-center mask. Results from all tiles and country rasters are summed per
+submitted shape.
 
 The worker loads the index on each process. If it is missing, unreadable,
 malformed, or stale, the worker rebuilds all discovered raster entries before
@@ -110,14 +122,17 @@ Git-ignored `artifacts/population/` tree by default.
 
 Intersected rasters are processed concurrently with a maximum of four threads
 (and never more than available CPUs or selected rasters). Every thread opens its
-own raster. Boundary shapes sharing a tile are submitted to exactextract in one
-batch, and raster results are merged in discovery order.
+own raster. In fractional mode, boundary shapes sharing a tile are submitted to
+exactextract in one batch. Center-mode boundary masks use Rasterio's standard
+center-inclusion behavior. Raster results are merged in discovery order.
 
-The local provider always invokes the worker with `--method fractional`. It
-checks that the raster source and worker are readable, enforces a worker timeout,
-and rejects process failures, malformed output, non-finite or negative
-populations, and mismatched result IDs. It does not silently retry through
-WorldPop.
+The population provider selects `fractional` or `center` from the submitted
+target and passes that mode to the local worker. WorldPop mode accepts the same
+request but retains its prior calculation behavior and ignores the local mode.
+The local adapter checks that the raster source and worker are readable,
+enforces a worker timeout, and rejects process failures, malformed output,
+non-finite or negative populations, and mismatched result IDs. It does not
+silently retry through WorldPop.
 
 For a one-command local development start from the repository root:
 
@@ -126,13 +141,19 @@ POPULATION_PROVIDER=local POPULATION_RASTER_PATH="$PWD/data/population" POPULATI
 ```
 
 Each successful local request writes one `[local-population timing]` block to
-the Next.js server log. It reports Python process startup, geospatial dependency
-imports, raster discovery, raster metadata indexing, tile-index loading or
-rebuilding, polygon/raster checks, concurrent raster wall time, per-raster tile
-classification and exactextract time, fully-inside and boundary tile counts,
-boundary pixels, total worker time, and total Next.js adapter time. These
-diagnostics travel over the worker's stderr stream and are never added to the
-public API response.
+the Next.js server log. It reports the selected calculation mode, Python process
+startup, geospatial dependency imports, raster discovery, raster metadata
+indexing, tile-index loading or rebuilding, polygon/raster checks, concurrent
+raster wall time, per-raster tile classification and boundary extraction time,
+fully-inside and boundary tile counts, boundary pixels, total worker time, and
+total Next.js adapter time. These diagnostics travel over the worker's stderr
+stream and are never added to the public API response.
+
+The existing large-Europe fixture measured 250,235,350.905 people in fractional
+mode and 250,234,863.995 with center boundaries, a 486.910-person or 0.000195%
+difference. In the same warm run, total worker time was 578.6 ms fractional and
+263.1 ms center. These are local diagnostic measurements, not production
+latency guarantees.
 
 ## Calculation benchmark
 

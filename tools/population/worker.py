@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import sys
+from threading import Lock
 import time
 from typing import Any
 
@@ -28,6 +29,7 @@ EXPECTED_RESOLUTION_DEGREES = 1 / 1200
 METHODS = ("fractional", "center", "all-touched")
 WORKER_READY_MARKER = "__WORLDRAWING_POPULATION_WORKER_READY__"
 MAX_RASTER_WORKERS = 4
+CENTER_MASK_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -59,6 +61,7 @@ class RasterWorkResult:
 
 @dataclass
 class WorkerTimings:
+    calculation_method: str = ""
     dependency_import_ms: float = 0.0
     raster_discovery_ms: float = 0.0
     raster_metadata_index_ms: float = 0.0
@@ -299,6 +302,43 @@ def extract_fractional_population(
     return contributions, extraction_ms
 
 
+def extract_center_population(
+    raster: Any,
+    window: Any,
+    shapes: list[dict[str, Any]],
+    relevant_indices: list[int],
+    geometry_mask: Any,
+    numpy: Any,
+) -> tuple[list[tuple[int, float]], float]:
+    extraction_started_at = time.perf_counter()
+    values = raster.read(1, window=window, masked=True)
+    nodata_mask = numpy.ma.getmaskarray(values)
+    contributions: list[tuple[int, float]] = []
+    for shape_index in relevant_indices:
+        # Rasterio's GDAL-backed rasterizer shares process-global state. Serialize
+        # these short mask operations while raster reads remain concurrent.
+        with CENTER_MASK_LOCK:
+            selected = geometry_mask(
+                [shapes[shape_index]["geometry"]],
+                out_shape=(int(window.height), int(window.width)),
+                transform=raster.window_transform(window),
+                all_touched=False,
+                invert=True,
+            )
+        selected_values = numpy.ma.array(
+            values.data,
+            mask=nodata_mask | ~selected,
+            copy=False,
+        )
+        population = (
+            float(selected_values.sum(dtype="float64"))
+            if selected_values.count()
+            else 0.0
+        )
+        contributions.append((shape_index, population))
+    return contributions, (time.perf_counter() - extraction_started_at) * 1_000
+
+
 def process_tiled_raster(
     entry: RasterIndexEntry,
     tile_entry: dict[str, Any],
@@ -306,6 +346,7 @@ def process_tiled_raster(
     shapes: list[dict[str, Any]],
     shape_geometries: list[Any],
     relevant_indices: list[int],
+    method: str,
     dependencies: dict[str, Any],
 ) -> RasterWorkResult:
     raster_open_started_at = time.perf_counter()
@@ -363,21 +404,31 @@ def process_tiled_raster(
                 boundary_tiles += 1
                 boundary_shape_matches += len(boundary_indices)
                 boundary_pixels += int(window.width) * int(window.height)
-                source = make_windowed_raster_source(
-                    raster,
-                    window,
-                    dependencies["rasterio_raster_source"],
-                    dependencies["raster_source_base"],
-                    dependencies["window_bounds"],
-                )
-                contributions, tile_extraction_ms = extract_fractional_population(
-                    source,
-                    raster.crs,
-                    shapes,
-                    boundary_indices,
-                    dependencies["exact_extract"],
-                    dependencies["json_feature_source"],
-                )
+                if method == "fractional":
+                    source = make_windowed_raster_source(
+                        raster,
+                        window,
+                        dependencies["rasterio_raster_source"],
+                        dependencies["raster_source_base"],
+                        dependencies["window_bounds"],
+                    )
+                    contributions, tile_extraction_ms = extract_fractional_population(
+                        source,
+                        raster.crs,
+                        shapes,
+                        boundary_indices,
+                        dependencies["exact_extract"],
+                        dependencies["json_feature_source"],
+                    )
+                else:
+                    contributions, tile_extraction_ms = extract_center_population(
+                        raster,
+                        window,
+                        shapes,
+                        boundary_indices,
+                        dependencies["geometry_mask"],
+                        dependencies["numpy"],
+                    )
                 extraction_ms += tile_extraction_ms
                 for shape_index, population in contributions:
                     raster_populations[shape_index] += population
@@ -396,7 +447,7 @@ def process_tiled_raster(
             boundary_tiles=boundary_tiles,
             boundary_shape_matches=boundary_shape_matches,
             boundary_pixels=boundary_pixels,
-            extraction_method="exactextract",
+            extraction_method="exactextract" if method == "fractional" else "center",
             extraction_ms=extraction_ms,
         ),
     )
@@ -481,10 +532,12 @@ def calculate_population(
 
     dependency_import_started_at = time.perf_counter()
     try:
+        import numpy
         import rasterio
         from exactextract import exact_extract
         from exactextract.feature import JSONFeatureSource
         from exactextract.raster import RasterioRasterSource, RasterSource
+        from rasterio.features import geometry_mask
         from rasterio.mask import mask as mask_raster
         from rasterio.windows import Window, bounds as window_bounds
         from shapely.geometry import box, shape as read_geometry
@@ -497,7 +550,7 @@ def calculate_population(
     raster_index = discover_rasters(raster_source_path, rasterio, timings)
     raster_paths = [entry.path for entry in raster_index]
     tile_data: dict[str, Any] | None = None
-    if method == "fractional":
+    if method in ("fractional", "center"):
         tile_index_started_at = time.perf_counter()
         tile_index_file = index_path(tile_index_root, tile_size)
         tile_data, build_seconds, rebuilt = prepare_index(
@@ -521,11 +574,13 @@ def calculate_population(
 
     dependencies = {
         "rasterio": rasterio,
+        "numpy": numpy,
         "exact_extract": exact_extract,
         "json_feature_source": JSONFeatureSource,
         "rasterio_raster_source": RasterioRasterSource,
         "raster_source_base": RasterSource,
         "mask_raster": mask_raster,
+        "geometry_mask": geometry_mask,
         "window_type": Window,
         "window_bounds": window_bounds,
         "box": box,
@@ -555,7 +610,7 @@ def calculate_population(
 
     def run_job(job: tuple[RasterIndexEntry, list[int]]) -> RasterWorkResult:
         entry, relevant_indices = job
-        if method == "fractional":
+        if method in ("fractional", "center"):
             if tile_data is None:
                 raise RuntimeError("Tile index was not initialized.")
             return process_tiled_raster(
@@ -565,6 +620,7 @@ def calculate_population(
                 shapes,
                 shape_geometries,
                 relevant_indices,
+                method,
                 dependencies,
             )
         return process_binary_raster(
@@ -610,6 +666,7 @@ def calculate_population(
 def write_timing_report(timings: WorkerTimings) -> None:
     lines = [
         "[population-worker timing]",
+        f"  calculation mode: {timings.calculation_method}",
         f"  geospatial dependency imports: {timings.dependency_import_ms:.1f} ms",
         (
             f"  raster discovery: {timings.raster_discovery_ms:.1f} ms "
@@ -662,7 +719,7 @@ def write_timing_report(timings: WorkerTimings) -> None:
             f"  tiled totals: {total_inside} fully-inside tile matches; "
             f"{total_boundary_tiles} boundary tiles; "
             f"{total_boundary_shape_matches} boundary shape matches; "
-            f"{total_boundary_pixels} exact pixels"
+            f"{total_boundary_pixels} boundary pixels"
         )
     lines.append(f"  total worker (ready to result): {timings.total_worker_ms:.1f} ms")
     print("\n".join(lines), file=sys.stderr, flush=True)
@@ -673,6 +730,7 @@ def main() -> int:
     print(WORKER_READY_MARKER, file=sys.stderr, flush=True)
     worker_started_at = time.perf_counter()
     timings = WorkerTimings()
+    timings.calculation_method = arguments.method
 
     try:
         if not arguments.raster:

@@ -7,6 +7,7 @@ export type PopulationShape = {
 
 export type PopulationRequest = {
   shapes: PopulationShape[];
+  targetPopulation: number;
 };
 
 export type PopulationResult = {

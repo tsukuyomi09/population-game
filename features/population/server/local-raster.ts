@@ -5,8 +5,8 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
-import type { PopulationResult } from "../types";
-import type { PopulationProvider } from "./provider";
+import type { PopulationResult, PopulationShape } from "../types";
+import type { PopulationCalculationMode } from "./calculation-mode";
 
 const WORKER_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 1_000_000;
@@ -28,9 +28,10 @@ function isPopulationResult(value: unknown): value is PopulationResult {
   );
 }
 
-export const localRasterPopulationProvider: PopulationProvider = async (
-  shapes,
-) => {
+export async function localRasterPopulationProvider(
+  shapes: PopulationShape[],
+  calculationMode: PopulationCalculationMode,
+): Promise<PopulationResult[]> {
   if (shapes.length === 0) return [];
 
   const adapterStartedAt = performance.now();
@@ -59,11 +60,11 @@ export const localRasterPopulationProvider: PopulationProvider = async (
     throw new Error(`Local population worker is missing or unreadable: ${workerPath}`);
   }
 
-  return await new Promise((resolve, reject) => {
+  return await new Promise<PopulationResult[]>((resolve, reject) => {
     const spawnStartedAt = performance.now();
     const child = spawn(
       pythonPath,
-      [workerPath, "--raster", resolvedRasterSourcePath, "--method", "fractional"],
+      [workerPath, "--raster", resolvedRasterSourcePath, "--method", calculationMode],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
     let stdout = "";
@@ -148,6 +149,7 @@ export const localRasterPopulationProvider: PopulationProvider = async (
         const timingLines = [
           "[local-population timing]",
           `  submitted shapes: ${shapes.length}`,
+          `  calculation mode: ${calculationMode}`,
           `  Python process startup: ${processStartupMs === null ? "unavailable" : `${processStartupMs.toFixed(1)} ms`}`,
         ];
         const diagnostics = workerDiagnostics();
@@ -172,4 +174,4 @@ export const localRasterPopulationProvider: PopulationProvider = async (
     });
     child.stdin.end(JSON.stringify({ shapes }));
   });
-};
+}

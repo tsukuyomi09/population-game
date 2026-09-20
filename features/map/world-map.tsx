@@ -158,6 +158,7 @@ export function WorldMap() {
 
     try {
       const requestBody: PopulationRequest = {
+        targetPopulation: target,
         shapes: featureCollection.features.map((feature) => {
           if (feature.id === undefined) {
             throw new Error("A completed polygon is missing an id.");

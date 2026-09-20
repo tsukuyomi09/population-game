@@ -32,6 +32,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument("--worker", type=Path, default=DEFAULT_WORKER)
     parser.add_argument("--timeout", type=float, default=420)
+    parser.add_argument(
+        "--target-population",
+        type=float,
+        default=1_000_000,
+        help="Target population required by /api/population (default: 1,000,000).",
+    )
     return parser.parse_args()
 
 
@@ -207,6 +213,7 @@ def main() -> int:
     arguments = parse_arguments()
     try:
         payload = load_payload(arguments.fixtures)
+        payload["targetPopulation"] = arguments.target_population
         local_results = {}
         for method in METHODS:
             print(f"Running local raster worker ({method})...", file=sys.stderr)
