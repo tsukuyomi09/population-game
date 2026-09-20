@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Benchmark exact population extraction with preaggregated raster tiles."""
+"""Compare full exactextract with the production tiled fractional calculation."""
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import json
 import math
 import os
 from pathlib import Path
@@ -12,12 +13,10 @@ import sys
 import time
 from typing import Any
 
-from benchmark import (
-    DEFAULT_POLYGON,
-    DEFAULT_RASTER_DIRECTORY,
-    benchmark_fractional,
-    load_geometry,
-)
+ROOT = Path(__file__).resolve().parents[3]
+POPULATION_TOOLS = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(POPULATION_TOOLS))
+
 from tile_index import (
     DEFAULT_INDEX_ROOT,
     DEFAULT_TILE_SIZE,
@@ -27,6 +26,10 @@ from tile_index import (
     prepare_index,
     tile_window,
 )
+
+
+DEFAULT_POLYGON = Path(__file__).parent / "fixtures" / "europe-large-polygon.json"
+DEFAULT_RASTER_DIRECTORY = ROOT / "data" / "population"
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,125 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def select_geometry(document: Any, shape_id: str | None) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise ValueError("Polygon input must be a JSON object.")
+
+    candidates: list[tuple[Any, Any]]
+    document_type = document.get("type")
+    if document_type == "Polygon":
+        candidates = [(None, document)]
+    elif document_type == "Feature":
+        candidates = [(document.get("id"), document.get("geometry"))]
+    elif document_type == "FeatureCollection":
+        features = document.get("features")
+        if not isinstance(features, list):
+            raise ValueError("GeoJSON FeatureCollection must contain a features array.")
+        candidates = [
+            (feature.get("id"), feature.get("geometry"))
+            for feature in features
+            if isinstance(feature, dict)
+        ]
+    elif isinstance(document.get("shapes"), list):
+        candidates = [
+            (shape.get("id"), shape.get("geometry"))
+            for shape in document["shapes"]
+            if isinstance(shape, dict)
+        ]
+    else:
+        raise ValueError(
+            "Input must be a GeoJSON Polygon/Feature/FeatureCollection or an "
+            "/api/population request payload."
+        )
+
+    if shape_id is not None:
+        candidates = [candidate for candidate in candidates if str(candidate[0]) == shape_id]
+        if len(candidates) != 1:
+            raise ValueError(f"Expected exactly one shape with id {shape_id!r}.")
+    elif len(candidates) != 1:
+        raise ValueError("Input contains multiple shapes; provide --shape-id.")
+
+    geometry = candidates[0][1]
+    if not isinstance(geometry, dict) or geometry.get("type") != "Polygon":
+        raise ValueError("The selected geometry must be a GeoJSON Polygon.")
+    return geometry
+
+
+def load_geometry(path: Path, shape_id: str | None) -> dict[str, Any]:
+    if str(path) == "-":
+        document = json.load(sys.stdin)
+    else:
+        with path.expanduser().open(encoding="utf-8") as polygon_file:
+            document = json.load(polygon_file)
+    return select_geometry(document, shape_id)
+
+
+def make_windowed_raster_source(
+    raster: Any,
+    window: Any,
+    rasterio_raster_source: Any,
+    raster_source_base: Any,
+    window_bounds: Any,
+) -> Any:
+    parent_source = rasterio_raster_source(raster)
+    left, bottom, right, top = window_bounds(window, raster.transform)
+
+    class WindowedRasterSource(raster_source_base):
+        def __init__(self) -> None:
+            super().__init__()
+
+        def res(self) -> tuple[float, float]:
+            return parent_source.res()
+
+        def extent(self) -> tuple[float, float, float, float]:
+            return (left, bottom, right, top)
+
+        def nodata_value(self) -> Any:
+            return parent_source.nodata_value()
+
+        def srs_wkt(self) -> str | None:
+            return parent_source.srs_wkt()
+
+        def read_window(self, x0: int, y0: int, nx: int, ny: int) -> Any:
+            return parent_source.read_window(
+                int(window.col_off) + x0,
+                int(window.row_off) + y0,
+                nx,
+                ny,
+            )
+
+    return WindowedRasterSource()
+
+
+def extract_fractional_population(
+    raster: Any,
+    window: Any,
+    geometry: dict[str, Any],
+    dependencies: dict[str, Any],
+) -> float:
+    source = make_windowed_raster_source(
+        raster,
+        window,
+        dependencies["rasterio_raster_source"],
+        dependencies["raster_source_base"],
+        dependencies["window_bounds"],
+    )
+    vector = dependencies["json_feature_source"](
+        [{"type": "Feature", "properties": {}, "geometry": geometry}],
+        srs_wkt=raster.crs.to_wkt(),
+    )
+    extracted = dependencies["exact_extract"](
+        source,
+        vector,
+        "population=sum(default_value=0)",
+        progress=False,
+    )
+    if len(extracted) != 1:
+        raise RuntimeError("exactextract returned an unexpected number of results.")
+    value = extracted[0].get("properties", {}).get("population")
+    return 0.0 if value is None else float(value)
+
+
 def relevant_window(raster: Any, geometry: dict[str, Any], geometry_window: Any, window_error: Any) -> Any | None:
     try:
         return geometry_window(raster, [geometry]).round_offsets().round_lengths()
@@ -94,17 +216,9 @@ def run_full_exactextract(
                 continue
             relevant_rasters += 1
             pixels += int(window.width) * int(window.height)
-            result = benchmark_fractional(
-                raster,
-                window,
-                geometry,
-                dependencies["exact_extract"],
-                dependencies["json_feature_source"],
-                dependencies["rasterio_raster_source"],
-                dependencies["raster_source_base"],
-                dependencies["window_bounds"],
+            population += extract_fractional_population(
+                raster, window, geometry, dependencies
             )
-            population += result.population or 0.0
     return FullResult(
         population=population,
         seconds=time.perf_counter() - started_at,
@@ -164,17 +278,9 @@ def run_tiled(
 
                     boundary_tiles += 1
                     boundary_pixels += int(window.width) * int(window.height)
-                    result = benchmark_fractional(
-                        raster,
-                        window,
-                        geometry,
-                        dependencies["exact_extract"],
-                        dependencies["json_feature_source"],
-                        dependencies["rasterio_raster_source"],
-                        dependencies["raster_source_base"],
-                        dependencies["window_bounds"],
+                    population += extract_fractional_population(
+                        raster, window, geometry, dependencies
                     )
-                    population += result.population or 0.0
 
     return TiledResult(
         population=population,

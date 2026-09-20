@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the live WorldPop-backed API with the local raster worker."""
+"""Compare the WorldPop-backed API with supported local worker modes."""
 
 from __future__ import annotations
 
@@ -14,11 +14,11 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_FIXTURES = Path(__file__).parent / "fixtures" / "italy-polygons.json"
-DEFAULT_WORKER = Path(__file__).parent / "worker.py"
+DEFAULT_WORKER = Path(__file__).parent.parent / "worker.py"
 DEFAULT_RASTER = ROOT / "data" / "population" / "ita_pop_2026_CN_100m_R2025A_v1.tif"
-METHODS = ("fractional", "center", "all-touched")
+METHODS = ("fractional", "center")
 FOCUS_SHAPE_IDS = {"small-milan", "fractional-pixel-bologna"}
 
 

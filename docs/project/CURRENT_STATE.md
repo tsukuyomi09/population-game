@@ -10,7 +10,7 @@ Active development branch: `dev`.
 
 Latest major checkpoint:
 
-`refactor: replace Terra Draw with custom drawing and shape editing`
+`perf: add target-aware hybrid population calculation`
 
 ## Working
 
@@ -51,30 +51,57 @@ The full game flow has been tested successfully with the custom drawing system.
 
 ### Population
 
-`POST /api/population` currently uses the WorldPop API and returns real population data.
+The local population engine is now validated end to end and can replace the WorldPop API at runtime.
 
-Normal-size selections work correctly.
+Current architecture:
+
+- `/api/population` contract remains unchanged externally.
+- Provider selection is environment-driven; WorldPop remains available as reference/fallback.
+- Local mode discovers compatible WorldPop 2026 constrained 100 m country rasters automatically.
+- Multi-country and cross-border shapes are supported.
+- Population raster values are summed locally; no WorldPop request is required in local mode.
+- Raster data stays outside Git.
+
+Performance architecture:
+
+- Country rasters are preaggregated into 512×512-pixel tile totals.
+- Fully-inside tiles use cached totals.
+- Only boundary tiles touch the original 100 m raster.
+- Boundary rasters are processed concurrently with bounded workers.
+- Tile indexes are persisted, validated, and rebuilt when stale.
+
+Boundary calculation is target-aware:
+
+- target < 20,000,000 → fractional exactextract
+- target >= 20,000,000 → pixel-center inclusion
+
+This rule was chosen for gameplay performance, not maximum GIS precision. Benchmarks showed that center inclusion changes the score by at most 1 point out of 10,000 in the tested high-target cases.
+
+Validated local data currently includes eight European country rasters: Italy, Switzerland, France, Germany, Austria, Spain, Belgium, and the Netherlands.
+
+Recent in-game local benchmarks with warm indexes were approximately 270–374 ms for tested single-shape submissions using the hybrid engine. Earlier large-Europe full-fractional calculation was reduced from several seconds to sub-second tiled processing.
 
 ## Main blocker
 
-The external WorldPop API cannot support the full game.
+The WorldPop API is no longer the architectural blocker.
 
-Large valid selections such as continental-scale areas exceed its polygon-area limits, and its request quota is unsuitable for production.
+The remaining population-engine work is operational scale:
 
-This is now the main technical blocker.
+- acquire and manage global 2026 100 m country rasters
+- generate/maintain tile indexes for global coverage
+- choose production storage/cache/deployment architecture
+- benchmark real server hardware and concurrent users
 
 ## Next milestone
 
-Replace the external WorldPop calculation with our own population calculation while preserving the existing `/api/population` contract.
+Expand the validated local engine from the current eight-country dataset to global coverage without changing the population API or gameplay.
 
-First step:
+Initial production direction:
 
-- use one WorldPop 2026 100 m GeoTIFF, initially Italy
-- calculate population locally for a submitted polygon
-- compare the result with the current WorldPop API
-- do not change the frontend contract
-
-If validated, expand the solution to multiple rasters and eventually global coverage.
+- country GeoTIFF/COG files stored server-side/object storage, not in the application repository
+- cached/precomputed tile indexes
+- population service with fast access to the required rasters
+- keep WorldPop only as a validation/reference path until the local engine is fully deployed
 
 ## Later
 
@@ -82,20 +109,6 @@ After population calculation works without external API limits, return to gamepl
 
 ## Immediate next task
 
-Improve the frontend UI foundation.
+Population engine: move from the current eight-country validation set toward global raster coverage and production deployment.
 
-The current UI is still mostly custom React + CSS and is visually provisional.
-
-Next:
-- introduce Tailwind CSS
-- introduce shadcn/ui for reusable UI primitives
-- migrate the existing UI away from legacy custom styling
-- remove obsolete application CSS after migration
-- preserve MapLibre-required/global CSS
-- keep all gameplay and interactions unchanged during the migration
-
-This first step is infrastructure only, not the visual redesign itself.
-
-After the migration, redesign the game HUD, score/results, controls, buttons, overlays, and interaction feedback with a cohesive game-oriented visual language.
-
-Use shadcn as infrastructure, not as a default SaaS/dashboard aesthetic.
+The Tailwind CSS + shadcn/ui foundation migration is already complete. The actual visual redesign of the HUD, results, controls, overlays, and game identity remains a later product/UI phase.

@@ -26,7 +26,7 @@ from tile_index import (
 
 
 EXPECTED_RESOLUTION_DEGREES = 1 / 1200
-METHODS = ("fractional", "center", "all-touched")
+METHODS = ("fractional", "center")
 WORKER_READY_MARKER = "__WORLDRAWING_POPULATION_WORKER_READY__"
 MAX_RASTER_WORKERS = 4
 CENTER_MASK_LOCK = Lock()
@@ -453,72 +453,6 @@ def process_tiled_raster(
     )
 
 
-def extract_binary_population(
-    raster: Any,
-    shapes: list[dict[str, Any]],
-    relevant_indices: list[int],
-    method: str,
-    mask_raster: Any,
-) -> tuple[list[tuple[int, float]], float]:
-    extraction_started_at = time.perf_counter()
-    contributions: list[tuple[int, float]] = []
-    for shape_index in relevant_indices:
-        try:
-            selected, _ = mask_raster(
-                raster,
-                [shapes[shape_index]["geometry"]],
-                all_touched=method == "all-touched",
-                crop=True,
-                filled=False,
-                indexes=1,
-            )
-        except ValueError:
-            contributions.append((shape_index, 0.0))
-            continue
-        population = float(selected.sum(dtype="float64")) if selected.count() else 0.0
-        contributions.append((shape_index, population))
-    return contributions, (time.perf_counter() - extraction_started_at) * 1_000
-
-
-def process_binary_raster(
-    entry: RasterIndexEntry,
-    shapes: list[dict[str, Any]],
-    relevant_indices: list[int],
-    method: str,
-    dependencies: dict[str, Any],
-) -> RasterWorkResult:
-    raster_open_started_at = time.perf_counter()
-    raster = dependencies["rasterio"].open(entry.path)
-    raster_open_ms = (time.perf_counter() - raster_open_started_at) * 1_000
-    try:
-        validate_raster(raster, entry.path)
-        contributions, extraction_ms = extract_binary_population(
-            raster,
-            shapes,
-            relevant_indices,
-            method,
-            dependencies["mask_raster"],
-        )
-    finally:
-        raster.close()
-    return RasterWorkResult(
-        contributions=contributions,
-        timing=RasterTiming(
-            name=entry.path.name,
-            shape_count=len(relevant_indices),
-            open_ms=raster_open_ms,
-            classification_ms=0.0,
-            classification_checks=0,
-            fully_inside_tile_matches=0,
-            boundary_tiles=0,
-            boundary_shape_matches=0,
-            boundary_pixels=0,
-            extraction_method=method,
-            extraction_ms=extraction_ms,
-        ),
-    )
-
-
 def calculate_population(
     raster_source_path: Path,
     shapes: list[dict[str, Any]],
@@ -538,7 +472,6 @@ def calculate_population(
         from exactextract.feature import JSONFeatureSource
         from exactextract.raster import RasterioRasterSource, RasterSource
         from rasterio.features import geometry_mask
-        from rasterio.mask import mask as mask_raster
         from rasterio.windows import Window, bounds as window_bounds
         from shapely.geometry import box, shape as read_geometry
     except ImportError as error:
@@ -549,28 +482,26 @@ def calculate_population(
 
     raster_index = discover_rasters(raster_source_path, rasterio, timings)
     raster_paths = [entry.path for entry in raster_index]
-    tile_data: dict[str, Any] | None = None
-    if method in ("fractional", "center"):
-        tile_index_started_at = time.perf_counter()
-        tile_index_file = index_path(tile_index_root, tile_size)
-        tile_data, build_seconds, rebuilt = prepare_index(
-            raster_paths,
-            tile_index_file,
-            tile_size,
-            False,
-            rasterio,
-            Window,
-        )
-        timings.tile_index_ms = (time.perf_counter() - tile_index_started_at) * 1_000
-        timings.tile_index_build_ms = build_seconds * 1_000
-        timings.tile_index_rebuilt = rebuilt
-        timings.tile_index_path = str(tile_index_file)
-        timings.tile_index_size = tile_index_file.stat().st_size
-        timings.tile_size = tile_size
-        timings.total_tiles = sum(
-            entry["tile_rows"] * entry["tile_columns"]
-            for entry in tile_data["rasters"].values()
-        )
+    tile_index_started_at = time.perf_counter()
+    tile_index_file = index_path(tile_index_root, tile_size)
+    tile_data, build_seconds, rebuilt = prepare_index(
+        raster_paths,
+        tile_index_file,
+        tile_size,
+        False,
+        rasterio,
+        Window,
+    )
+    timings.tile_index_ms = (time.perf_counter() - tile_index_started_at) * 1_000
+    timings.tile_index_build_ms = build_seconds * 1_000
+    timings.tile_index_rebuilt = rebuilt
+    timings.tile_index_path = str(tile_index_file)
+    timings.tile_index_size = tile_index_file.stat().st_size
+    timings.tile_size = tile_size
+    timings.total_tiles = sum(
+        entry["tile_rows"] * entry["tile_columns"]
+        for entry in tile_data["rasters"].values()
+    )
 
     dependencies = {
         "rasterio": rasterio,
@@ -579,7 +510,6 @@ def calculate_population(
         "json_feature_source": JSONFeatureSource,
         "rasterio_raster_source": RasterioRasterSource,
         "raster_source_base": RasterSource,
-        "mask_raster": mask_raster,
         "geometry_mask": geometry_mask,
         "window_type": Window,
         "window_bounds": window_bounds,
@@ -610,22 +540,12 @@ def calculate_population(
 
     def run_job(job: tuple[RasterIndexEntry, list[int]]) -> RasterWorkResult:
         entry, relevant_indices = job
-        if method in ("fractional", "center"):
-            if tile_data is None:
-                raise RuntimeError("Tile index was not initialized.")
-            return process_tiled_raster(
-                entry,
-                tile_data["rasters"][entry.path.name],
-                tile_size,
-                shapes,
-                shape_geometries,
-                relevant_indices,
-                method,
-                dependencies,
-            )
-        return process_binary_raster(
+        return process_tiled_raster(
             entry,
+            tile_data["rasters"][entry.path.name],
+            tile_size,
             shapes,
+            shape_geometries,
             relevant_indices,
             method,
             dependencies,
