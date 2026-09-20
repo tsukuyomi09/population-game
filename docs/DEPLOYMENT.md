@@ -100,5 +100,35 @@ The service does not become ready until engine initialization completes.
 
 ## Local development
 
-The existing `npm run dev`, local Python virtual environment, and `.env` workflow
-remain unchanged. Production Compose files and environment values are opt-in.
+Install the JavaScript and Python dependencies once:
+
+```sh
+npm ci
+python3 -m venv .venv-population
+.venv-population/bin/python -m pip install -r tools/population/requirements.txt
+```
+
+Place compatible rasters in `data/population/`, then start both the persistent
+Python population service and the hot-reloading Next.js server:
+
+```sh
+npm run dev
+```
+
+Open `http://localhost:3000`. Press Ctrl-C once to stop both processes. Local
+defaults use the raster provider, `data/population/`,
+`artifacts/population/tile-index/`, and loopback ports 3000 and 8001. An optional
+`.env.local` can override the population settings from `.env.example`.
+
+To run the production images locally instead, use:
+
+```sh
+npm run prod:local
+npm run prod:local:down
+```
+
+The start command creates an ignored `.env.production` from
+`deploy/production.env.example` when it is missing, points it at the repository's
+`data/population/` directory, and generates a local bearer token. Existing
+`.env.production` values are preserved. The down command stops the containers
+without removing the persistent tile-index volume.
