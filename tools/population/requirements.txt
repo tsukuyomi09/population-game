@@ -1,0 +1,4 @@
+# Python 3.12+
+exactextract==0.3.0
+rasterio==1.5.1
+shapely==2.1.2

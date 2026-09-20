@@ -1,6 +1,7 @@
 import "server-only";
 
 import type { Polygon } from "geojson";
+import type { PopulationResult, PopulationShape } from "../types";
 
 const POPULATION_URL = "https://api.worldpop.org/v2/population";
 const TASKS_URL = "https://api.worldpop.org/v2/tasks";
@@ -61,7 +62,7 @@ async function fetchBeforeDeadline(
   }
 }
 
-export async function calculateWorldPopPopulation(geometry: Polygon) {
+async function calculateWorldPopPolygonPopulation(geometry: Polygon) {
   const deadline = Date.now() + TIMEOUT_MS;
   const submission = await fetchBeforeDeadline(POPULATION_URL, deadline, {
     method: "POST",
@@ -124,4 +125,18 @@ export async function calculateWorldPopPopulation(geometry: Polygon) {
   }
 
   throw new Error(`WorldPop calculation timed out after ${TIMEOUT_MS / 1_000} seconds.`);
+}
+
+export async function worldPopPopulationProvider(
+  shapes: PopulationShape[],
+): Promise<PopulationResult[]> {
+  const results: PopulationResult[] = [];
+
+  // Preserve the existing sequential request behavior while exposing a batch boundary.
+  for (const shape of shapes) {
+    const population = await calculateWorldPopPolygonPopulation(shape.geometry);
+    results.push({ id: shape.id, population });
+  }
+
+  return results;
 }

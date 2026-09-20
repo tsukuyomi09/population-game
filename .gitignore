@@ -10,6 +10,26 @@
 
 # local environment files
 .env*
+!.env.example
+
+# local population datasets and generated geospatial artifacts
+/data/population/
+/artifacts/population/
+*.tif
+*.tiff
+*.vrt
+*.ovr
+*.aux.xml
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+
+# isolated population worker environment
+/.venv-population/
+__pycache__/
+*.py[cod]
 
 # TypeScript
 *.tsbuildinfo
