@@ -1,18 +1,21 @@
-import type { TerraDraw } from "terra-draw";
-import type { Polygon } from "geojson";
+import type { FeatureCollection, Polygon } from "geojson";
+import type { CompletedDrawing } from "./draw";
 
-type DrawFeature = ReturnType<TerraDraw["getSnapshot"]>[number];
-type DrawPolygonFeature = DrawFeature & { geometry: Polygon };
-
-export function createPolygonFeatureCollection(draw: TerraDraw) {
-  const polygons = draw.getSnapshot().filter(
-    (feature): feature is DrawPolygonFeature =>
-      feature.geometry.type === "Polygon" &&
-      feature.properties.currentlyDrawing !== true,
-  );
-
+export function createPolygonFeatureCollection(
+  drawings: CompletedDrawing[],
+): FeatureCollection<Polygon> {
   return {
-    type: "FeatureCollection" as const,
-    features: polygons,
+    type: "FeatureCollection",
+    features: drawings
+      .filter((drawing) => drawing.closed)
+      .map((drawing) => ({
+        id: drawing.id,
+        type: "Feature",
+        properties: {},
+        geometry: {
+          type: "Polygon",
+          coordinates: [drawing.points],
+        },
+      })),
   };
 }
