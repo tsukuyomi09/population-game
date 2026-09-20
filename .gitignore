@@ -39,6 +39,8 @@ next-env.d.ts
 # system files
 .DS_Store
 
-# Internal project/Codex context
+# Internal project documentation
 docs/project/
 docs/POPULATION_ENGINE.md
+docs/DEPLOYMENT.md
+docs/RAILWAY.md
