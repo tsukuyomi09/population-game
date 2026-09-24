@@ -3,17 +3,19 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
+import multiprocessing
 import os
 from pathlib import Path
 from queue import Queue
 import secrets
 import sys
 from threading import BoundedSemaphore
+import time
 from typing import Any, Callable
 
 from engine import METHODS, PopulationEngine, validate_shapes
@@ -23,6 +25,7 @@ from tile_index import DEFAULT_INDEX_ROOT, DEFAULT_TILE_SIZE
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8001
 DEFAULT_ENGINE_WORKERS = 2
+DEFAULT_PROCESS_WORKERS = 0
 DEFAULT_QUEUE_SIZE = 8
 DEFAULT_RETRY_AFTER_SECONDS = 1
 DEFAULT_MAX_REQUEST_BYTES = 1_000_000
@@ -50,6 +53,7 @@ class PopulationServiceConfig:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     engine_workers: int = DEFAULT_ENGINE_WORKERS
+    process_workers: int = DEFAULT_PROCESS_WORKERS
     queue_size: int = DEFAULT_QUEUE_SIZE
     retry_after_seconds: int = DEFAULT_RETRY_AFTER_SECONDS
     max_request_bytes: int = DEFAULT_MAX_REQUEST_BYTES
@@ -77,6 +81,9 @@ class PopulationServiceConfig:
             port=port,
             engine_workers=read_integer_setting(
                 "POPULATION_SERVICE_WORKERS", DEFAULT_ENGINE_WORKERS, 1
+            ),
+            process_workers=read_integer_setting(
+                "POPULATION_SERVICE_PROCESS_WORKERS", DEFAULT_PROCESS_WORKERS, 0
             ),
             queue_size=read_integer_setting(
                 "POPULATION_SERVICE_QUEUE_SIZE", DEFAULT_QUEUE_SIZE, 0
@@ -115,6 +122,101 @@ class PopulationEnginePool:
         finally:
             self._available.put(engine)
 
+    def close(self) -> None:
+        pass
+
+
+_PROCESS_ENGINE: PopulationEngine | None = None
+
+
+def initialize_process_engine(
+    raster_source_path: str,
+    tile_size: int,
+    tile_index_root: str,
+    ready: Any,
+) -> None:
+    global _PROCESS_ENGINE
+    _PROCESS_ENGINE = PopulationEngine(
+        Path(raster_source_path),
+        tile_size,
+        Path(tile_index_root),
+    )
+    ready.put(os.getpid())
+
+
+def calculate_with_process_engine(
+    shapes: list[dict[str, Any]],
+    method: str,
+) -> list[dict[str, Any]]:
+    if _PROCESS_ENGINE is None:
+        raise RuntimeError("Population process engine was not initialized.")
+    return _PROCESS_ENGINE.calculate(shapes, method)
+
+
+def process_worker_identity() -> int:
+    return os.getpid()
+
+
+class ProcessPopulationEnginePool:
+    def __init__(
+        self,
+        size: int,
+        raster_source_path: Path,
+        tile_size: int,
+        tile_index_root: Path,
+        startup_timeout_seconds: int = 900,
+    ) -> None:
+        if size <= 0:
+            raise ValueError("At least one population process is required.")
+
+        self.size = size
+        self._context = multiprocessing.get_context("spawn")
+        self._ready = self._context.Queue()
+        self._executor = ProcessPoolExecutor(
+            max_workers=size,
+            mp_context=self._context,
+            initializer=initialize_process_engine,
+            initargs=(
+                str(raster_source_path),
+                tile_size,
+                str(tile_index_root),
+                self._ready,
+            ),
+        )
+
+        startup_futures = [
+            self._executor.submit(process_worker_identity) for _ in range(size)
+        ]
+        deadline = time.monotonic() + startup_timeout_seconds
+        try:
+            initialized_pids: set[int] = set()
+            while len(initialized_pids) < size:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Population process initialization timed out.")
+                initialized_pids.add(self._ready.get(timeout=remaining))
+            for future in startup_futures:
+                future.result()
+        except Exception:
+            self.close()
+            raise
+
+    def calculate(
+        self,
+        shapes: list[dict[str, Any]],
+        method: str,
+    ) -> list[dict[str, Any]]:
+        return self._executor.submit(
+            calculate_with_process_engine,
+            shapes,
+            method,
+        ).result()
+
+    def close(self) -> None:
+        self._executor.shutdown(wait=True, cancel_futures=True)
+        self._ready.close()
+        self._ready.join_thread()
+
 
 class ServiceSaturatedError(RuntimeError):
     pass
@@ -123,7 +225,7 @@ class ServiceSaturatedError(RuntimeError):
 class PopulationServiceState:
     def __init__(
         self,
-        engine_pool: PopulationEnginePool | None,
+        engine_pool: PopulationEnginePool | ProcessPopulationEnginePool | None,
         queue_size: int,
         retry_after_seconds: int,
         max_request_bytes: int,
@@ -165,6 +267,10 @@ class PopulationServiceState:
         if authorization is None:
             return False
         return secrets.compare_digest(authorization, f"Bearer {self.auth_token}")
+
+    def close(self) -> None:
+        if self.engine_pool is not None:
+            self.engine_pool.close()
 
 
 class PopulationHTTPServer(HTTPServer):
@@ -224,6 +330,7 @@ class PopulationHTTPServer(HTTPServer):
     def server_close(self) -> None:
         super().server_close()
         self._executor.shutdown(wait=True, cancel_futures=True)
+        self.state.close()
 
 
 class PopulationRequestHandler(BaseHTTPRequestHandler):
@@ -355,22 +462,40 @@ def create_population_server(
     config: PopulationServiceConfig,
     engine_factory: Callable[[Path, int, Path], PopulationEngine] = PopulationEngine,
 ) -> PopulationHTTPServer:
-    engines = [
-        engine_factory(
-            config.raster_source_path,
-            config.tile_size,
-            config.tile_index_root,
+    if config.process_workers:
+        engine_pool: PopulationEnginePool | ProcessPopulationEnginePool = (
+            ProcessPopulationEnginePool(
+                config.process_workers,
+                config.raster_source_path,
+                config.tile_size,
+                config.tile_index_root,
+            )
         )
-        for _ in range(config.engine_workers)
-    ]
+    else:
+        engines = [
+            engine_factory(
+                config.raster_source_path,
+                config.tile_size,
+                config.tile_index_root,
+            )
+            for _ in range(config.engine_workers)
+        ]
+        engine_pool = PopulationEnginePool(engines)
+
     state = PopulationServiceState(
-        PopulationEnginePool(engines),
+        engine_pool,
         config.queue_size,
         config.retry_after_seconds,
         config.max_request_bytes,
         config.auth_token,
     )
     return PopulationHTTPServer((config.host, config.port), state)
+
+
+def configured_execution_description(config: PopulationServiceConfig) -> str:
+    if config.process_workers:
+        return f"{config.process_workers} process engines"
+    return f"{config.engine_workers} threaded engines"
 
 
 def main() -> int:
@@ -384,7 +509,8 @@ def main() -> int:
     host, port = server.server_address[:2]
     print(
         f"Population service ready on http://{host}:{port} "
-        f"with {config.engine_workers} engines and queue capacity {config.queue_size}.",
+        f"with {configured_execution_description(config)} "
+        f"and queue capacity {config.queue_size}.",
         file=sys.stderr,
         flush=True,
     )
