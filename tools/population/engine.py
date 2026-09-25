@@ -35,15 +35,22 @@ class RasterIndexEntry:
 class RasterTiming:
     name: str
     shape_count: int
+    total_ms: float
     open_ms: float
+    tile_count: int
+    tile_setup_ms: float
     classification_ms: float
     classification_checks: int
     fully_inside_tile_matches: int
+    inside_aggregation_ms: float
     boundary_tiles: int
     boundary_shape_matches: int
     boundary_pixels: int
     extraction_method: str
     extraction_ms: float
+    center_read_ms: float
+    center_mask_ms: float
+    center_sum_ms: float
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,9 @@ class RasterWorkResult:
 @dataclass
 class PopulationTimings:
     calculation_method: str = ""
+    total_calculation_ms: float = 0.0
+    geometry_creation_ms: float = 0.0
+    result_aggregation_ms: float = 0.0
     dependency_import_ms: float = 0.0
     raster_discovery_ms: float = 0.0
     raster_metadata_index_ms: float = 0.0
@@ -277,12 +287,19 @@ def extract_center_population(
     numpy: Any,
 ) -> tuple[list[tuple[int, float]], float]:
     extraction_started_at = time.perf_counter()
+
+    read_started_at = time.perf_counter()
     values = raster.read(1, window=window, masked=True)
     nodata_mask = numpy.ma.getmaskarray(values)
-    contributions: list[tuple[int, float]] = []
+    read_ms = (time.perf_counter() - read_started_at) * 1_000
+
+    mask_ms = 0.0
+    sum_ms = 0.0
     for shape_index in relevant_indices:
         # Rasterio's GDAL-backed rasterizer shares process-global state. Serialize
         # these short mask operations while raster reads remain concurrent.
+        mask_started_at = time.perf_counter()
+
         with CENTER_MASK_LOCK:
             selected = geometry_mask(
                 [shapes[shape_index]["geometry"]],
@@ -291,6 +308,11 @@ def extract_center_population(
                 all_touched=False,
                 invert=True,
             )
+
+        mask_ms += (time.perf_counter() - mask_started_at) * 1_000
+
+        sum_started_at = time.perf_counter()
+
         selected_values = numpy.ma.array(
             values.data,
             mask=nodata_mask | ~selected,
@@ -301,9 +323,18 @@ def extract_center_population(
             if selected_values.count()
             else 0.0
         )
-        contributions.append((shape_index, population))
-    return contributions, (time.perf_counter() - extraction_started_at) * 1_000
 
+        sum_ms += (time.perf_counter() - sum_started_at) * 1_000
+
+        contributions.append((shape_index, population))
+
+    return (
+        contributions,
+        (time.perf_counter() - extraction_started_at) * 1_000,
+        read_ms,
+        mask_ms,
+        sum_ms,
+    )
 
 def process_tiled_raster(
     entry: RasterIndexEntry,
@@ -315,25 +346,41 @@ def process_tiled_raster(
     method: str,
     dependencies: dict[str, Any],
 ) -> RasterWorkResult:
+    raster_total_started_at = time.perf_counter()
+
     raster_open_started_at = time.perf_counter()
     raster = dependencies["rasterio"].open(entry.path)
     raster_open_ms = (time.perf_counter() - raster_open_started_at) * 1_000
+
     raster_populations = {index: 0.0 for index in relevant_indices}
+
+    tile_count = 0
+    tile_setup_ms = 0.0
     classification_ms = 0.0
     classification_checks = 0
     fully_inside_tile_matches = 0
+    inside_aggregation_ms = 0.0
     boundary_tiles = 0
     boundary_shape_matches = 0
     boundary_pixels = 0
     extraction_ms = 0.0
 
+    center_read_ms = 0.0
+    center_mask_ms = 0.0
+    center_sum_ms = 0.0
+
     try:
         if tile_entry["width"] != raster.width or tile_entry["height"] != raster.height:
             raise RuntimeError(f"Tile index dimensions do not match raster {entry.path}")
+
         totals = tile_entry["totals"]
 
         for tile_row in range(tile_entry["tile_rows"]):
             for tile_column in range(tile_entry["tile_columns"]):
+                tile_count += 1
+
+                tile_setup_started_at = time.perf_counter()
+
                 window = tile_window(
                     tile_row,
                     tile_column,
@@ -342,33 +389,57 @@ def process_tiled_raster(
                     raster.height,
                     dependencies["window_type"],
                 )
+
                 extent = dependencies["box"](
                     *dependencies["window_bounds"](window, raster.transform)
                 )
+
+                tile_setup_ms += (
+                    time.perf_counter() - tile_setup_started_at
+                ) * 1_000
+
                 boundary_indices: list[int] = []
+
                 classification_started_at = time.perf_counter()
+
                 for shape_index in relevant_indices:
                     classification_checks += 1
                     geometry = shape_geometries[shape_index]
+
                     if not geometry.intersects(extent):
                         continue
+
                     if geometry.covers(extent):
+                        inside_started_at = time.perf_counter()
+
                         total_offset = (
                             tile_row * tile_entry["tile_columns"] + tile_column
                         )
-                        raster_populations[shape_index] += float(totals[total_offset])
+
+                        raster_populations[shape_index] += float(
+                            totals[total_offset]
+                        )
+
                         fully_inside_tile_matches += 1
+
+                        inside_aggregation_ms += (
+                            time.perf_counter() - inside_started_at
+                        ) * 1_000
+
                     else:
                         boundary_indices.append(shape_index)
+
                 classification_ms += (
                     time.perf_counter() - classification_started_at
                 ) * 1_000
 
                 if not boundary_indices:
                     continue
+
                 boundary_tiles += 1
                 boundary_shape_matches += len(boundary_indices)
                 boundary_pixels += int(window.width) * int(window.height)
+
                 if method == "fractional":
                     source = make_windowed_raster_source(
                         raster,
@@ -377,6 +448,7 @@ def process_tiled_raster(
                         dependencies["raster_source_base"],
                         dependencies["window_bounds"],
                     )
+
                     contributions, tile_extraction_ms = extract_fractional_population(
                         source,
                         raster.crs,
@@ -385,8 +457,15 @@ def process_tiled_raster(
                         dependencies["exact_extract"],
                         dependencies["json_feature_source"],
                     )
+
                 else:
-                    contributions, tile_extraction_ms = extract_center_population(
+                    (
+                        contributions,
+                        tile_extraction_ms,
+                        tile_read_ms,
+                        tile_mask_ms,
+                        tile_sum_ms,
+                    ) = extract_center_population(
                         raster,
                         window,
                         shapes,
@@ -394,9 +473,16 @@ def process_tiled_raster(
                         dependencies["geometry_mask"],
                         dependencies["numpy"],
                     )
+
+                    center_read_ms += tile_read_ms
+                    center_mask_ms += tile_mask_ms
+                    center_sum_ms += tile_sum_ms
+
                 extraction_ms += tile_extraction_ms
+
                 for shape_index, population in contributions:
                     raster_populations[shape_index] += population
+
     finally:
         raster.close()
 
@@ -405,15 +491,22 @@ def process_tiled_raster(
         timing=RasterTiming(
             name=entry.path.name,
             shape_count=len(relevant_indices),
+            total_ms=(time.perf_counter() - raster_total_started_at) * 1_000,
             open_ms=raster_open_ms,
+            tile_count=tile_count,
+            tile_setup_ms=tile_setup_ms,
             classification_ms=classification_ms,
             classification_checks=classification_checks,
             fully_inside_tile_matches=fully_inside_tile_matches,
+            inside_aggregation_ms=inside_aggregation_ms,
             boundary_tiles=boundary_tiles,
             boundary_shape_matches=boundary_shape_matches,
             boundary_pixels=boundary_pixels,
             extraction_method="exactextract" if method == "fractional" else "center",
             extraction_ms=extraction_ms,
+            center_read_ms=center_read_ms,
+            center_mask_ms=center_mask_ms,
+            center_sum_ms=center_sum_ms,
         ),
     )
 
@@ -506,6 +599,8 @@ class PopulationEngine:
         method: str,
         timings: PopulationTimings | None = None,
     ) -> list[dict[str, Any]]:
+        calculation_started_at = time.perf_counter()
+
         if method not in METHODS:
             raise ValueError(f"Unsupported population calculation method: {method!r}")
 
@@ -517,9 +612,15 @@ class PopulationEngine:
         if not shapes:
             return []
 
+        geometry_started_at = time.perf_counter()
+
         shape_geometries = [
             self.dependencies["read_geometry"](shape["geometry"]) for shape in shapes
         ]
+
+        timings.geometry_creation_ms = (
+            time.perf_counter() - geometry_started_at
+        ) * 1_000
         populations = [0.0 for _ in shapes]
         jobs: list[tuple[RasterIndexEntry, list[int]]] = []
 
@@ -567,25 +668,89 @@ class PopulationEngine:
             time.perf_counter() - concurrent_processing_started_at
         ) * 1_000
 
+                result_aggregation_started_at = time.perf_counter()
+
         results_by_raster = {
             work_result.timing.name: work_result for work_result in work_results
         }
+
         for raster_entry in self.raster_index:
             work_result = results_by_raster.get(raster_entry.path.name)
             if work_result is None:
                 continue
+
             timings.raster_timings.append(work_result.timing)
+
             for shape_index, population in work_result.contributions:
                 populations[shape_index] += population
 
         results: list[dict[str, Any]] = []
+
         for index, population in enumerate(populations):
             shape_id = shapes[index]["id"]
+
             if not math.isfinite(population) or population < 0:
                 raise RuntimeError(
                     f"Invalid population result for shape {shape_id!r}: {population}"
                 )
+
             results.append({"id": shape_id, "population": population})
+
+        timings.result_aggregation_ms = (
+            time.perf_counter() - result_aggregation_started_at
+        ) * 1_000
+
+        timings.total_calculation_ms = (
+            time.perf_counter() - calculation_started_at
+        ) * 1_000
+
+        if os.getenv("POPULATION_PROFILE") == "1":
+            print("\n=== POPULATION PROFILE ===", flush=True)
+            print(f"method: {timings.calculation_method}", flush=True)
+            print(f"total: {timings.total_calculation_ms:.2f} ms", flush=True)
+            print(f"geometry: {timings.geometry_creation_ms:.2f} ms", flush=True)
+            print(
+                f"rasters: {timings.selected_raster_count} selected / "
+                f"{timings.discovered_raster_count} total",
+                flush=True,
+            )
+            print(
+                f"raster intersection: {timings.raster_intersection_ms:.2f} ms "
+                f"({timings.raster_intersection_checks} checks)",
+                flush=True,
+            )
+            print(
+                f"concurrent processing: {timings.concurrent_processing_ms:.2f} ms "
+                f"with {timings.concurrent_worker_count} workers",
+                flush=True,
+            )
+            print(
+                f"result aggregation: {timings.result_aggregation_ms:.2f} ms",
+                flush=True,
+            )
+
+            for r in timings.raster_timings:
+                print(
+                    f"\n[{r.name}]\n"
+                    f"  total: {r.total_ms:.2f} ms\n"
+                    f"  open: {r.open_ms:.2f} ms\n"
+                    f"  tiles visited: {r.tile_count}\n"
+                    f"  tile setup: {r.tile_setup_ms:.2f} ms\n"
+                    f"  classification: {r.classification_ms:.2f} ms\n"
+                    f"  classification checks: {r.classification_checks}\n"
+                    f"  fully inside: {r.fully_inside_tile_matches}\n"
+                    f"  inside aggregation: {r.inside_aggregation_ms:.2f} ms\n"
+                    f"  boundary tiles: {r.boundary_tiles}\n"
+                    f"  boundary pixels: {r.boundary_pixels}\n"
+                    f"  extraction ({r.extraction_method}): {r.extraction_ms:.2f} ms\n"
+                    f"  center read: {r.center_read_ms:.2f} ms\n"
+                    f"  center mask: {r.center_mask_ms:.2f} ms\n"
+                    f"  center sum: {r.center_sum_ms:.2f} ms",
+                    flush=True,
+                )
+
+            print("=== END PROFILE ===\n", flush=True)
+
         return results
 
     def _copy_initialization_timings(self, timings: PopulationTimings) -> None:
