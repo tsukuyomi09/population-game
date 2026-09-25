@@ -668,7 +668,7 @@ class PopulationEngine:
             time.perf_counter() - concurrent_processing_started_at
         ) * 1_000
 
-                result_aggregation_started_at = time.perf_counter()
+        result_aggregation_started_at = time.perf_counter()
 
         results_by_raster = {
             work_result.timing.name: work_result for work_result in work_results
