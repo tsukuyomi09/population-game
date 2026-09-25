@@ -377,8 +377,43 @@ def process_tiled_raster(
 
         totals = tile_entry["totals"]
 
-        for tile_row in range(tile_entry["tile_rows"]):
-            for tile_column in range(tile_entry["tile_columns"]):
+        geometry_bounds = [
+            shape_geometries[index].bounds
+            for index in relevant_indices
+        ]
+
+        min_x = min(bounds[0] for bounds in geometry_bounds)
+        min_y = min(bounds[1] for bounds in geometry_bounds)
+        max_x = max(bounds[2] for bounds in geometry_bounds)
+        max_y = max(bounds[3] for bounds in geometry_bounds)
+
+        left = max(min_x, raster.bounds.left)
+        bottom = max(min_y, raster.bounds.bottom)
+        right = min(max_x, raster.bounds.right)
+        top = min(max_y, raster.bounds.top)
+
+        pixel_window = raster.window(left, bottom, right, top)
+
+        tile_row_start = max(
+            0,
+            math.floor(pixel_window.row_off / tile_size),
+        )
+        tile_row_end = min(
+            tile_entry["tile_rows"],
+            math.ceil((pixel_window.row_off + pixel_window.height) / tile_size),
+        )
+
+        tile_column_start = max(
+            0,
+            math.floor(pixel_window.col_off / tile_size),
+        )
+        tile_column_end = min(
+            tile_entry["tile_columns"],
+            math.ceil((pixel_window.col_off + pixel_window.width) / tile_size),
+        )
+
+        for tile_row in range(tile_row_start, tile_row_end):
+            for tile_column in range(tile_column_start, tile_column_end):
                 tile_count += 1
 
                 tile_setup_started_at = time.perf_counter()
