@@ -295,6 +295,8 @@ def extract_center_population(
 
     mask_ms = 0.0
     sum_ms = 0.0
+    contributions: list[tuple[int, float]] = []
+
     for shape_index in relevant_indices:
         # Rasterio's GDAL-backed rasterizer shares process-global state. Serialize
         # these short mask operations while raster reads remain concurrent.
