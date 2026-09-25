@@ -21,7 +21,7 @@ from tile_index import (
 
 EXPECTED_RESOLUTION_DEGREES = 1 / 1200
 METHODS = ("fractional", "center")
-MAX_RASTER_WORKERS = 4
+MAX_RASTER_WORKERS = 1
 CENTER_MASK_LOCK = Lock()
 
 
