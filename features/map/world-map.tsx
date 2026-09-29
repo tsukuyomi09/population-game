@@ -9,9 +9,10 @@ import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
   calculateRoundScore,
   MAX_GAME_SCORE,
-  requestRoundTarget,
+  requestRoundStart,
   ROUND_COUNT,
 } from "../game/game";
+import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type { PopulationRequest, PopulationResponse } from "../population/types";
 import {
   createMap,
@@ -25,7 +26,8 @@ export function WorldMap() {
   const mapRef = useRef<MapLibreMap>(null);
   const drawRef = useRef<DrawController>(null);
   const [isDrawReady, setIsDrawReady] = useState(false);
-  const [hasStarted, setHasStarted] = useState(false);
+  const [runtimePlayer, setRuntimePlayer] =
+    useState<RuntimePlayerSummary | null>(null);
   const [target, setTarget] = useState<number | null>(null);
   const [populationResponse, setPopulationResponse] =
     useState<PopulationResponse | null>(null);
@@ -87,8 +89,8 @@ export function WorldMap() {
     const requestId = ++targetRequestRef.current;
 
     try {
-      const nextTarget = await requestRoundTarget();
-      return requestId === targetRequestRef.current ? nextTarget : null;
+      const nextRound = await requestRoundStart();
+      return requestId === targetRequestRef.current ? nextRound : null;
     } finally {
       if (requestId === targetRequestRef.current) {
         targetRequestPendingRef.current = false;
@@ -99,15 +101,15 @@ export function WorldMap() {
 
   const startGame = async () => {
     try {
-      const nextTarget = await loadTarget();
-      if (nextTarget === null) return;
+      const nextRound = await loadTarget();
+      if (nextRound === null) return;
 
       roundVersionRef.current += 1;
       setPopulationResponse(null);
       setRoundScores([]);
       setCurrentRound(1);
-      setTarget(nextTarget);
-      setHasStarted(true);
+      setTarget(nextRound.target);
+      setRuntimePlayer(nextRound.player);
     } catch (error) {
       console.error("Game start failed:", error);
     }
@@ -124,19 +126,23 @@ export function WorldMap() {
     setRoundScores([]);
     setCurrentRound(0);
     setTarget(null);
-    setHasStarted(false);
+    setRuntimePlayer(null);
   };
 
   const nextRound = async () => {
     try {
-      const nextTarget = await loadTarget();
-      if (nextTarget === null) return;
+      const nextRound = await loadTarget();
+      if (nextRound === null || runtimePlayer === null) return;
+
+      if (nextRound.player.runtimePlayerId !== runtimePlayer.runtimePlayerId) {
+        throw new Error("Game session identity changed during an active game.");
+      }
 
       roundVersionRef.current += 1;
       drawRef.current?.reset();
       setIsSubmitting(false);
       setPopulationResponse(null);
-      setTarget(nextTarget);
+      setTarget(nextRound.target);
       setCurrentRound((round) => round + 1);
     } catch (error) {
       console.error("Game start failed:", error);
@@ -314,7 +320,7 @@ export function WorldMap() {
           )}
         </div>
       )}
-      {!hasStarted && (
+      {runtimePlayer === null && (
         <div className="fixed inset-0 z-10 grid place-items-center bg-black/50">
           <Button
             type="button"

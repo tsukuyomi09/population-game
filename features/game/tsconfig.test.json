@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "Node20",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../..",
+    "outDir": "../../artifacts/game/identity-tests"
+  },
+  "files": ["runtime-player.test.ts", "runtime-player.ts"]
+}

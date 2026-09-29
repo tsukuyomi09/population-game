@@ -16,6 +16,7 @@
 # local population datasets and generated geospatial artifacts
 /data/population/
 /artifacts/population/
+/artifacts/game/identity-tests/
 *.tif
 *.tiff
 *.vrt

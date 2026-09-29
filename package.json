@@ -14,6 +14,7 @@
     "load:population": "node scripts/load-test-population.mjs",
     "prod:local": "node scripts/production-local.mjs up",
     "prod:local:down": "node scripts/production-local.mjs down",
+    "test:game-identity": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/runtime-player.test.js",
     "test:population-adapter": "tsc --project features/population/server/tsconfig.test.json && node --test artifacts/population/adapter-tests/features/population/server/population-service-client.test.js"
   },
   "dependencies": {
