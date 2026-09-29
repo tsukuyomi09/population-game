@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { cookies } from "next/headers";
-import type { GuestRuntimePlayer } from "../runtime-player";
+import { auth } from "../../../auth";
+import {
+  registeredRuntimePlayer,
+  type GuestRuntimePlayer,
+  type RuntimePlayer,
+} from "../runtime-player";
 
 const GUEST_SESSION_COOKIE = "worldrawing_guest_session";
 const UUID_PATTERN =
@@ -24,7 +29,13 @@ function isSecureRequest(request: Request) {
 
 export async function currentRuntimePlayer(
   request: Request,
-): Promise<GuestRuntimePlayer> {
+): Promise<RuntimePlayer> {
+  const session = await auth();
+
+  if (session?.worldrawingUserId) {
+    return registeredRuntimePlayer(session.worldrawingUserId);
+  }
+
   const cookieStore = await cookies();
   const existingSessionId = cookieStore.get(GUEST_SESSION_COOKIE)?.value;
   const guestSessionId =

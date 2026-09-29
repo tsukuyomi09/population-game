@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isRegisteredRuntimePlayer,
   isRuntimePlayerSummary,
+  registeredRuntimePlayer,
   toRuntimePlayerSummary,
   type RuntimePlayer,
 } from "./runtime-player";
@@ -22,14 +23,14 @@ test("keeps guest identity ephemeral and out of the client summary", () => {
 });
 
 test("represents registered identity with a durable user id", () => {
-  const player: RuntimePlayer = {
-    kind: "registered",
-    runtimePlayerId: "registered_runtime",
-    userId: "user_id",
-  };
+  const player: RuntimePlayer = registeredRuntimePlayer("user_id");
 
   assert.equal(isRegisteredRuntimePlayer(player), true);
-  assert.deepEqual(toRuntimePlayerSummary(player), player);
+  assert.deepEqual(toRuntimePlayerSummary(player), {
+    kind: "registered",
+    runtimePlayerId: "registered_user_id",
+    userId: "user_id",
+  });
 });
 
 test("validates the discriminated runtime player summary", () => {

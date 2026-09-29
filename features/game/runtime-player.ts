@@ -16,6 +16,14 @@ export type RuntimePlayerSummary =
   | Pick<GuestRuntimePlayer, "kind" | "runtimePlayerId">
   | Pick<RegisteredRuntimePlayer, "kind" | "runtimePlayerId" | "userId">;
 
+export function registeredRuntimePlayer(userId: string): RegisteredRuntimePlayer {
+  return {
+    kind: "registered",
+    runtimePlayerId: `registered_${userId}`,
+    userId,
+  };
+}
+
 export function isRegisteredRuntimePlayer(
   player: RuntimePlayer,
 ): player is RegisteredRuntimePlayer {
