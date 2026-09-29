@@ -8,6 +8,9 @@
     "prebuild": "node scripts/copy-maplibre-worker.mjs",
     "build": "next build --webpack",
     "start": "next start",
+    "db:migrate": "node-pg-migrate up",
+    "db:migrate:down": "node-pg-migrate down",
+    "db:migrate:create": "node-pg-migrate create --migration-file-language sql",
     "load:population": "node scripts/load-test-population.mjs",
     "prod:local": "node scripts/production-local.mjs up",
     "prod:local:down": "node scripts/production-local.mjs down",
@@ -20,6 +23,7 @@
     "lucide-react": "^1.47.0",
     "maplibre-gl": "^6.10.0",
     "next": "16.3.5",
+    "pg": "^8.23.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "tailwind-merge": "^3.7.0"
@@ -27,8 +31,10 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "26.6.2",
+    "@types/pg": "^8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "node-pg-migrate": "^9.0.0",
     "postcss": "^8.5.28",
     "tailwindcss": "^4.3.3",
     "tw-animate-css": "^1.4.0",
