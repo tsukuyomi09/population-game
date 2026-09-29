@@ -18,7 +18,7 @@ from threading import BoundedSemaphore
 import time
 from typing import Any, Callable
 
-from engine import METHODS, PopulationEngine, validate_shapes
+from engine import PopulationEngine, validate_shapes
 from tile_index import DEFAULT_INDEX_ROOT, DEFAULT_TILE_SIZE
 
 
@@ -114,11 +114,10 @@ class PopulationEnginePool:
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
     ) -> list[dict[str, Any]]:
         engine = self._available.get()
         try:
-            return engine.calculate(shapes, method)
+            return engine.calculate(shapes)
         finally:
             self._available.put(engine)
 
@@ -146,11 +145,10 @@ def initialize_process_engine(
 
 def calculate_with_process_engine(
     shapes: list[dict[str, Any]],
-    method: str,
 ) -> list[dict[str, Any]]:
     if _PROCESS_ENGINE is None:
         raise RuntimeError("Population process engine was not initialized.")
-    return _PROCESS_ENGINE.calculate(shapes, method)
+    return _PROCESS_ENGINE.calculate(shapes)
 
 
 def process_worker_identity() -> int:
@@ -204,12 +202,10 @@ class ProcessPopulationEnginePool:
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
     ) -> list[dict[str, Any]]:
         return self._executor.submit(
             calculate_with_process_engine,
             shapes,
-            method,
         ).result()
 
     def close(self) -> None:
@@ -250,14 +246,13 @@ class PopulationServiceState:
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
     ) -> list[dict[str, Any]]:
         if self.engine_pool is None:
             raise RuntimeError("Population service is not ready.")
         if not self._calculation_slots.acquire(blocking=False):
             raise ServiceSaturatedError("Population service is saturated.")
         try:
-            return self.engine_pool.calculate(shapes, method)
+            return self.engine_pool.calculate(shapes)
         finally:
             self._calculation_slots.release()
 
@@ -379,9 +374,6 @@ class PopulationRequestHandler(BaseHTTPRequestHandler):
             payload = self._read_json_body()
             if not isinstance(payload, dict):
                 raise ValueError("Request body must be a JSON object.")
-            method = payload.get("method")
-            if method not in METHODS:
-                raise ValueError('method must be either "fractional" or "center".')
             shapes = validate_shapes(payload.get("shapes"))
         except RequestTooLargeError as error:
             self._send_json(
@@ -394,7 +386,7 @@ class PopulationRequestHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            results = self.server.state.calculate(shapes, method)
+            results = self.server.state.calculate(shapes)
         except ServiceSaturatedError as error:
             self._send_json(
                 HTTPStatus.SERVICE_UNAVAILABLE,

@@ -1,0 +1,2 @@
+-r ../requirements.txt
+exactextract==0.3.0

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the WorldPop-backed API with supported local worker modes."""
+"""Compare WorldPop with production center and offline exact-fractional results."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import sys
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+from fractional import calculate_fractional_population
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -32,12 +34,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--fixtures", type=Path, default=DEFAULT_FIXTURES)
     parser.add_argument("--worker", type=Path, default=DEFAULT_WORKER)
     parser.add_argument("--timeout", type=float, default=420)
-    parser.add_argument(
-        "--target-population",
-        type=float,
-        default=1_000_000,
-        help="Target population required by /api/population (default: 1,000,000).",
-    )
     return parser.parse_args()
 
 
@@ -54,7 +50,6 @@ def run_local_worker(
     raster_path: Path,
     payload: dict[str, Any],
     timeout: float,
-    method: str,
 ) -> list[dict[str, Any]]:
     completed = subprocess.run(
         [
@@ -62,8 +57,6 @@ def run_local_worker(
             str(worker_path),
             "--raster",
             str(raster_path),
-            "--method",
-            method,
         ],
         input=json.dumps(payload),
         text=True,
@@ -213,17 +206,23 @@ def main() -> int:
     arguments = parse_arguments()
     try:
         payload = load_payload(arguments.fixtures)
-        payload["targetPopulation"] = arguments.target_population
-        local_results = {}
-        for method in METHODS:
-            print(f"Running local raster worker ({method})...", file=sys.stderr)
-            local_results[method] = run_local_worker(
-                arguments.worker,
-                Path(arguments.raster).expanduser().resolve(),
-                payload,
-                arguments.timeout,
-                method,
-            )
+        raster_path = Path(arguments.raster).expanduser().resolve()
+        print("Running production center calculation...", file=sys.stderr)
+        center_results = run_local_worker(
+            arguments.worker,
+            raster_path,
+            payload,
+            arguments.timeout,
+        )
+        print("Running offline exact-fractional calculation...", file=sys.stderr)
+        fractional_results = calculate_fractional_population(
+            raster_path,
+            payload["shapes"],
+        )
+        local_results = {
+            "fractional": fractional_results,
+            "center": center_results,
+        }
         print("Requesting WorldPop oracle through /api/population...", file=sys.stderr)
         worldpop_results = run_worldpop_api(
             arguments.api_url,

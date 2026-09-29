@@ -47,18 +47,15 @@ class EngineTracker:
         self.active = 0
         self.max_active = 0
         self.entered = 0
-        self.methods: list[str] = []
 
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
     ) -> list[dict[str, Any]]:
         with self.condition:
             self.active += 1
             self.entered += 1
             self.max_active = max(self.max_active, self.active)
-            self.methods.append(method)
             self.condition.notify_all()
         try:
             if not self.release.wait(timeout=5):
@@ -90,9 +87,8 @@ class FakeEngine:
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
     ) -> list[dict[str, Any]]:
-        return self.tracker.calculate(shapes, method)
+        return self.tracker.calculate(shapes)
 
 
 class RunningServer:
@@ -186,31 +182,25 @@ class PopulationServiceTests(unittest.TestCase):
         self.assertEqual(headers["Retry-After"], "4")
         self.assertEqual(body, {"status": "not_ready"})
 
-    def test_calculate_contract_preserves_mode_and_shape_order(self) -> None:
+    def test_calculate_contract_preserves_shape_order(self) -> None:
         tracker = EngineTracker()
         with RunningServer(self.create_server(tracker)) as service:
-            for method in ("fractional", "center"):
-                with self.subTest(method=method):
-                    status, _, body = service.request(
-                        "POST",
-                        "/v1/calculate",
-                        {
-                            "method": method,
-                            "shapes": [shape("second"), shape("first")],
-                        },
-                    )
-                    self.assertEqual(status, 200)
-                    self.assertEqual(
-                        body,
-                        {
-                            "results": [
-                                {"id": "second", "population": 1.0},
-                                {"id": "first", "population": 2.0},
-                            ]
-                        },
-                    )
+            status, _, body = service.request(
+                "POST",
+                "/v1/calculate",
+                {"shapes": [shape("second"), shape("first")]},
+            )
 
-        self.assertEqual(tracker.methods, ["fractional", "center"])
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            body,
+            {
+                "results": [
+                    {"id": "second", "population": 1.0},
+                    {"id": "first", "population": 2.0},
+                ]
+            },
+        )
 
     def test_calculate_requires_configured_bearer_token(self) -> None:
         tracker = EngineTracker()
@@ -221,13 +211,13 @@ class PopulationServiceTests(unittest.TestCase):
                 service.request(
                     "POST",
                     "/v1/calculate",
-                    {"method": "center", "shapes": [shape("unauthorized")]},
+                    {"shapes": [shape("unauthorized")]},
                 )
             )
             authorized_status, _, _ = service.request(
                 "POST",
                 "/v1/calculate",
-                {"method": "center", "shapes": [shape("authorized")]},
+                {"shapes": [shape("authorized")]},
                 headers={"Authorization": "Bearer service-secret"},
             )
 
@@ -250,7 +240,7 @@ class PopulationServiceTests(unittest.TestCase):
                 status, _, _ = service.request(
                     "POST",
                     "/v1/calculate",
-                    {"method": "fractional", "shapes": [shape(shape_id)]},
+                    {"shapes": [shape(shape_id)]},
                 )
                 with results_lock:
                     results.append(status)
@@ -282,7 +272,7 @@ class PopulationServiceTests(unittest.TestCase):
                     service.request(
                         "POST",
                         "/v1/calculate",
-                        {"method": "center", "shapes": [shape("running")]},
+                        {"shapes": [shape("running")]},
                     )[0]
                 )
             )
@@ -292,7 +282,7 @@ class PopulationServiceTests(unittest.TestCase):
             status, headers, body = service.request(
                 "POST",
                 "/v1/calculate",
-                {"method": "center", "shapes": [shape("rejected")]},
+                {"shapes": [shape("rejected")]},
             )
             tracker.release.set()
             first.join(timeout=5)

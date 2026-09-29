@@ -57,50 +57,46 @@ test("reads explicit and default service configuration", () => {
   );
 });
 
-test("posts both calculation modes with auth and preserves ordered results", async () => {
-  for (const method of ["fractional", "center"] as const) {
-    let capturedUrl = "";
-    let capturedInit: RequestInit | undefined;
-    const fetchImplementation: typeof fetch = async (input, init) => {
-      capturedUrl = String(input);
-      capturedInit = init;
-      return Response.json({
-        results: [
-          { id: "second", population: 10.5 },
-          { id: 1, population: 20.25 },
-        ],
-      });
-    };
+test("posts shapes with auth and preserves ordered results", async () => {
+  let capturedUrl = "";
+  let capturedInit: RequestInit | undefined;
+  const fetchImplementation: typeof fetch = async (input, init) => {
+    capturedUrl = String(input);
+    capturedInit = init;
+    return Response.json({
+      results: [
+        { id: "second", population: 10.5 },
+        { id: 1, population: 20.25 },
+      ],
+    });
+  };
 
-    const results = await calculatePopulationWithService(
-      shapes,
-      method,
-      config,
-      fetchImplementation,
-    );
+  const results = await calculatePopulationWithService(
+    shapes,
+    config,
+    fetchImplementation,
+  );
 
-    assert.equal(capturedUrl, "http://population.internal:8001/v1/calculate");
-    const requestInit = capturedInit;
-    assert.ok(requestInit);
-    assert.equal(requestInit.method, "POST");
-    assert.equal(
-      new Headers(requestInit.headers).get("Authorization"),
-      "Bearer test-token",
-    );
-    assert.equal(typeof requestInit.body, "string");
-    assert.deepEqual(JSON.parse(requestInit.body as string), { method, shapes });
-    assert.deepEqual(results, [
-      { id: "second", population: 10.5 },
-      { id: 1, population: 20.25 },
-    ]);
-  }
+  assert.equal(capturedUrl, "http://population.internal:8001/v1/calculate");
+  const requestInit = capturedInit;
+  assert.ok(requestInit);
+  assert.equal(requestInit.method, "POST");
+  assert.equal(
+    new Headers(requestInit.headers).get("Authorization"),
+    "Bearer test-token",
+  );
+  assert.equal(typeof requestInit.body, "string");
+  assert.deepEqual(JSON.parse(requestInit.body as string), { shapes });
+  assert.deepEqual(results, [
+    { id: "second", population: 10.5 },
+    { id: 1, population: 20.25 },
+  ]);
 });
 
 test("returns immediately for an empty shape batch", async () => {
   let fetchCalled = false;
   const results = await calculatePopulationWithService(
     [],
-    "fractional",
     { url: "invalid", timeoutMs: 1 },
     async () => {
       fetchCalled = true;
@@ -119,7 +115,6 @@ test("rejects invalid, missing, or reordered results", async () => {
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       config,
       responseFor({ results: [{ id: "second", population: 1 }] }),
     ),
@@ -128,7 +123,6 @@ test("rejects invalid, missing, or reordered results", async () => {
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       config,
       responseFor({
         results: [
@@ -142,7 +136,6 @@ test("rejects invalid, missing, or reordered results", async () => {
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       config,
       responseFor({ results: [{ id: "second", population: -1 }, {}] }),
     ),
@@ -154,7 +147,6 @@ test("maps saturation into a provider error with Retry-After", async () => {
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "center",
       config,
       async () =>
         Response.json(
@@ -170,7 +162,6 @@ test("maps service, network, and timeout failures into provider errors", async (
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       config,
       async () => Response.json({ error: "broken" }, { status: 500 }),
     ),
@@ -180,7 +171,6 @@ test("maps service, network, and timeout failures into provider errors", async (
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       config,
       async () => {
         throw new Error("connection refused");
@@ -192,7 +182,6 @@ test("maps service, network, and timeout failures into provider errors", async (
   await assert.rejects(
     calculatePopulationWithService(
       shapes,
-      "fractional",
       { ...config, timeoutMs: 5 },
       (_url, init) =>
         new Promise((_, reject) => {

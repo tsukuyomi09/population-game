@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare full exactextract with the production tiled fractional calculation."""
+"""Compare full exactextract with an offline tiled fractional calculation."""
 
 from __future__ import annotations
 
@@ -309,7 +309,7 @@ def main() -> int:
         from shapely.geometry import box, shape
     except ImportError:
         print(
-            "Benchmark error: install tools/population/requirements.txt first.",
+            "Benchmark error: install tools/population/validation/requirements.txt first.",
             file=sys.stderr,
         )
         return 1

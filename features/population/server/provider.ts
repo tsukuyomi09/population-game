@@ -4,16 +4,14 @@ import type {
   PopulationResult,
   PopulationShape,
 } from "../types";
-import { selectPopulationCalculationMode } from "./calculation-mode";
 import { localRasterPopulationProvider } from "./local-raster";
 import { worldPopPopulationProvider } from "./worldpop";
 
 export type PopulationProvider = (
   shapes: PopulationShape[],
-  targetPopulation: number,
 ) => Promise<PopulationResult[]>;
 
-export const populationProvider: PopulationProvider = (shapes, targetPopulation) => {
+export const populationProvider: PopulationProvider = (shapes) => {
   const configuredProvider = process.env.POPULATION_PROVIDER ?? "worldpop";
 
   if (configuredProvider === "worldpop") {
@@ -21,10 +19,7 @@ export const populationProvider: PopulationProvider = (shapes, targetPopulation)
   }
 
   if (configuredProvider === "local") {
-    return localRasterPopulationProvider(
-      shapes,
-      selectPopulationCalculationMode(targetPopulation),
-    );
+    return localRasterPopulationProvider(shapes);
   }
 
   throw new Error(

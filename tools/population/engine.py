@@ -20,7 +20,6 @@ from tile_index import (
 
 
 EXPECTED_RESOLUTION_DEGREES = 1 / 1200
-METHODS = ("fractional", "center")
 MAX_RASTER_WORKERS = 4
 CENTER_MASK_LOCK = Lock()
 
@@ -46,7 +45,6 @@ class RasterTiming:
     boundary_tiles: int
     boundary_shape_matches: int
     boundary_pixels: int
-    extraction_method: str
     extraction_ms: float
     center_read_ms: float
     center_mask_ms: float
@@ -61,7 +59,6 @@ class RasterWorkResult:
 
 @dataclass
 class PopulationTimings:
-    calculation_method: str = ""
     total_calculation_ms: float = 0.0
     geometry_creation_ms: float = 0.0
     result_aggregation_ms: float = 0.0
@@ -198,86 +195,6 @@ def bounded_worker_count(task_count: int) -> int:
     return min(task_count, MAX_RASTER_WORKERS, max(1, os.cpu_count() or 1))
 
 
-def make_windowed_raster_source(
-    raster: Any,
-    window: Any,
-    rasterio_raster_source: Any,
-    raster_source_base: Any,
-    window_bounds: Any,
-) -> Any:
-    parent_source = rasterio_raster_source(raster)
-    left, bottom, right, top = window_bounds(window, raster.transform)
-
-    class WindowedRasterSource(raster_source_base):
-        def __init__(self) -> None:
-            super().__init__()
-
-        def res(self) -> tuple[float, float]:
-            return parent_source.res()
-
-        def extent(self) -> tuple[float, float, float, float]:
-            return (left, bottom, right, top)
-
-        def nodata_value(self) -> Any:
-            return parent_source.nodata_value()
-
-        def srs_wkt(self) -> str | None:
-            return parent_source.srs_wkt()
-
-        def read_window(self, x0: int, y0: int, nx: int, ny: int) -> Any:
-            return parent_source.read_window(
-                int(window.col_off) + x0,
-                int(window.row_off) + y0,
-                nx,
-                ny,
-            )
-
-    return WindowedRasterSource()
-
-
-def extract_fractional_population(
-    raster_source: Any,
-    raster_crs: Any,
-    shapes: list[dict[str, Any]],
-    relevant_indices: list[int],
-    exact_extract: Any,
-    json_feature_source: Any,
-) -> tuple[list[tuple[int, float]], float]:
-    features = [
-        {
-            "type": "Feature",
-            "properties": {"shape_index": index},
-            "geometry": shapes[index]["geometry"],
-        }
-        for index in relevant_indices
-    ]
-    vector = json_feature_source(features, srs_wkt=raster_crs.to_wkt())
-    extraction_started_at = time.perf_counter()
-    extracted = exact_extract(
-        raster_source,
-        vector,
-        "population=sum(default_value=0)",
-        include_cols=["shape_index"],
-        progress=False,
-    )
-    extraction_ms = (time.perf_counter() - extraction_started_at) * 1_000
-    if len(extracted) != len(relevant_indices):
-        raise RuntimeError("exactextract returned an unexpected number of results.")
-
-    contributions: list[tuple[int, float]] = []
-    for output_index, feature in enumerate(extracted):
-        properties = feature.get("properties", {})
-        shape_index = properties.get("shape_index")
-        expected_shape_index = relevant_indices[output_index]
-        if shape_index != expected_shape_index:
-            raise RuntimeError("exactextract did not preserve the submitted shape index.")
-        population_value = properties.get("population")
-        contributions.append(
-            (expected_shape_index, 0.0 if population_value is None else float(population_value))
-        )
-    return contributions, extraction_ms
-
-
 def extract_center_population(
     raster: Any,
     window: Any,
@@ -338,6 +255,7 @@ def extract_center_population(
         sum_ms,
     )
 
+
 def process_tiled_raster(
     entry: RasterIndexEntry,
     tile_entry: dict[str, Any],
@@ -345,7 +263,6 @@ def process_tiled_raster(
     shapes: list[dict[str, Any]],
     shape_geometries: list[Any],
     relevant_indices: list[int],
-    method: str,
     dependencies: dict[str, Any],
 ) -> RasterWorkResult:
     raster_total_started_at = time.perf_counter()
@@ -477,43 +394,24 @@ def process_tiled_raster(
                 boundary_shape_matches += len(boundary_indices)
                 boundary_pixels += int(window.width) * int(window.height)
 
-                if method == "fractional":
-                    source = make_windowed_raster_source(
-                        raster,
-                        window,
-                        dependencies["rasterio_raster_source"],
-                        dependencies["raster_source_base"],
-                        dependencies["window_bounds"],
-                    )
+                (
+                    contributions,
+                    tile_extraction_ms,
+                    tile_read_ms,
+                    tile_mask_ms,
+                    tile_sum_ms,
+                ) = extract_center_population(
+                    raster,
+                    window,
+                    shapes,
+                    boundary_indices,
+                    dependencies["geometry_mask"],
+                    dependencies["numpy"],
+                )
 
-                    contributions, tile_extraction_ms = extract_fractional_population(
-                        source,
-                        raster.crs,
-                        shapes,
-                        boundary_indices,
-                        dependencies["exact_extract"],
-                        dependencies["json_feature_source"],
-                    )
-
-                else:
-                    (
-                        contributions,
-                        tile_extraction_ms,
-                        tile_read_ms,
-                        tile_mask_ms,
-                        tile_sum_ms,
-                    ) = extract_center_population(
-                        raster,
-                        window,
-                        shapes,
-                        boundary_indices,
-                        dependencies["geometry_mask"],
-                        dependencies["numpy"],
-                    )
-
-                    center_read_ms += tile_read_ms
-                    center_mask_ms += tile_mask_ms
-                    center_sum_ms += tile_sum_ms
+                center_read_ms += tile_read_ms
+                center_mask_ms += tile_mask_ms
+                center_sum_ms += tile_sum_ms
 
                 extraction_ms += tile_extraction_ms
 
@@ -539,7 +437,6 @@ def process_tiled_raster(
             boundary_tiles=boundary_tiles,
             boundary_shape_matches=boundary_shape_matches,
             boundary_pixels=boundary_pixels,
-            extraction_method="exactextract" if method == "fractional" else "center",
             extraction_ms=extraction_ms,
             center_read_ms=center_read_ms,
             center_mask_ms=center_mask_ms,
@@ -569,9 +466,6 @@ class PopulationEngine:
         try:
             import numpy
             import rasterio
-            from exactextract import exact_extract
-            from exactextract.feature import JSONFeatureSource
-            from exactextract.raster import RasterioRasterSource, RasterSource
             from rasterio.features import geometry_mask
             from rasterio.windows import Window, bounds as window_bounds
             from shapely.geometry import box, shape as read_geometry
@@ -587,10 +481,6 @@ class PopulationEngine:
         self.dependencies = {
             "rasterio": rasterio,
             "numpy": numpy,
-            "exact_extract": exact_extract,
-            "json_feature_source": JSONFeatureSource,
-            "rasterio_raster_source": RasterioRasterSource,
-            "raster_source_base": RasterSource,
             "geometry_mask": geometry_mask,
             "window_type": Window,
             "window_bounds": window_bounds,
@@ -633,17 +523,12 @@ class PopulationEngine:
     def calculate(
         self,
         shapes: list[dict[str, Any]],
-        method: str,
         timings: PopulationTimings | None = None,
     ) -> list[dict[str, Any]]:
         calculation_started_at = time.perf_counter()
 
-        if method not in METHODS:
-            raise ValueError(f"Unsupported population calculation method: {method!r}")
-
         if timings is None:
             timings = PopulationTimings()
-        timings.calculation_method = method
         self._copy_initialization_timings(timings)
 
         if not shapes:
@@ -689,7 +574,6 @@ class PopulationEngine:
                 shapes,
                 shape_geometries,
                 relevant_indices,
-                method,
                 self.dependencies,
             )
 
@@ -743,7 +627,6 @@ class PopulationEngine:
 
         if os.getenv("POPULATION_PROFILE") == "1":
             print("\n=== POPULATION PROFILE ===", flush=True)
-            print(f"method: {timings.calculation_method}", flush=True)
             print(f"total: {timings.total_calculation_ms:.2f} ms", flush=True)
             print(f"geometry: {timings.geometry_creation_ms:.2f} ms", flush=True)
             print(
@@ -779,7 +662,7 @@ class PopulationEngine:
                     f"  inside aggregation: {r.inside_aggregation_ms:.2f} ms\n"
                     f"  boundary tiles: {r.boundary_tiles}\n"
                     f"  boundary pixels: {r.boundary_pixels}\n"
-                    f"  extraction ({r.extraction_method}): {r.extraction_ms:.2f} ms\n"
+                    f"  center extraction: {r.extraction_ms:.2f} ms\n"
                     f"  center read: {r.center_read_ms:.2f} ms\n"
                     f"  center mask: {r.center_mask_ms:.2f} ms\n"
                     f"  center sum: {r.center_sum_ms:.2f} ms",

@@ -39,8 +39,6 @@ WORKLOAD = [
         },
     }
 ]
-METHOD = "fractional"
-
 _ENGINE: PopulationEngine | None = None
 
 
@@ -87,7 +85,7 @@ def initialize_worker(
 ) -> None:
     global _ENGINE
     _ENGINE = PopulationEngine(Path(raster_path), tile_size, Path(index_root))
-    _ENGINE.calculate(WORKLOAD, METHOD)
+    _ENGINE.calculate(WORKLOAD)
     ready.put(os.getpid())
 
 
@@ -98,7 +96,7 @@ def calculate(_: int) -> dict[str, Any]:
     timings = PopulationTimings()
     cpu_started_at = time.process_time()
     started_at = time.perf_counter()
-    results = _ENGINE.calculate(WORKLOAD, METHOD, timings)
+    results = _ENGINE.calculate(WORKLOAD, timings)
     latency_ms = (time.perf_counter() - started_at) * 1_000
     cpu_seconds = time.process_time() - cpu_started_at
 
@@ -266,7 +264,6 @@ def main() -> int:
         previous_rps = stage["rps"]
 
     report = {
-        "method": METHOD,
         "workload": WORKLOAD,
         "startMethod": context.get_start_method(),
         "requestsPerStage": arguments.requests,

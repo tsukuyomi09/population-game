@@ -1,5 +1,4 @@
 import type { PopulationResult, PopulationShape } from "../types";
-import type { PopulationCalculationMode } from "./calculation-mode";
 
 const DEFAULT_SERVICE_URL = "http://127.0.0.1:8001";
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -95,7 +94,6 @@ function serviceErrorMessage(body: unknown) {
 
 export async function calculatePopulationWithService(
   shapes: PopulationShape[],
-  calculationMode: PopulationCalculationMode,
   config: PopulationServiceConfig,
   fetchImplementation: FetchImplementation = fetch,
 ): Promise<PopulationResult[]> {
@@ -121,7 +119,7 @@ export async function calculatePopulationWithService(
       response = await fetchImplementation(calculationUrl(config.url), {
         method: "POST",
         headers,
-        body: JSON.stringify({ method: calculationMode, shapes }),
+        body: JSON.stringify({ shapes }),
         signal: controller.signal,
       });
     } catch (error) {

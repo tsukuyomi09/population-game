@@ -33,18 +33,15 @@ export async function POST(request: Request) {
   if (
     typeof body !== "object" ||
     body === null ||
-    !Array.isArray((body as Record<string, unknown>).shapes) ||
-    typeof (body as Record<string, unknown>).targetPopulation !== "number" ||
-    !Number.isFinite((body as Record<string, unknown>).targetPopulation) ||
-    ((body as Record<string, unknown>).targetPopulation as number) <= 0
+    !Array.isArray((body as Record<string, unknown>).shapes)
   ) {
     return Response.json(
-      { error: "A shapes array and positive targetPopulation are required." },
+      { error: "A shapes array is required." },
       { status: 400 },
     );
   }
 
-  const { shapes, targetPopulation } = body as PopulationRequest;
+  const { shapes } = body as PopulationRequest;
 
   if (!shapes.every(isPopulationShape)) {
     return Response.json(
@@ -54,7 +51,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const results = await populationProvider(shapes, targetPopulation);
+    const results = await populationProvider(shapes);
 
     const response: PopulationResponse = {
       results,

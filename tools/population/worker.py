@@ -10,7 +10,7 @@ from pathlib import Path
 import sys
 import time
 
-from engine import METHODS, PopulationEngine, PopulationTimings, validate_shapes
+from engine import PopulationEngine, PopulationTimings, validate_shapes
 from tile_index import DEFAULT_INDEX_ROOT, DEFAULT_TILE_SIZE
 
 
@@ -26,12 +26,6 @@ def parse_arguments() -> argparse.Namespace:
             "Population raster directory or a legacy path to one raster in that directory "
             "(or set POPULATION_RASTER_PATH)."
         ),
-    )
-    parser.add_argument(
-        "--method",
-        choices=METHODS,
-        default="fractional",
-        help="Pixel inclusion rule (default: fractional).",
     )
     parser.add_argument(
         "--tile-size",
@@ -57,7 +51,6 @@ def read_shapes() -> list[dict[str, Any]]:
 def write_timing_report(timings: PopulationTimings) -> None:
     lines = [
         "[population-worker timing]",
-        f"  calculation mode: {timings.calculation_method}",
         f"  geospatial dependency imports: {timings.dependency_import_ms:.1f} ms",
         (
             f"  raster discovery: {timings.raster_discovery_ms:.1f} ms "
@@ -102,7 +95,7 @@ def write_timing_report(timings: PopulationTimings) -> None:
             f"boundary {raster_timing.boundary_tiles} tiles/"
             f"{raster_timing.boundary_shape_matches} shape matches/"
             f"{raster_timing.boundary_pixels} pixels; "
-            f"{raster_timing.extraction_method} {raster_timing.extraction_ms:.1f} ms; "
+            f"center extraction {raster_timing.extraction_ms:.1f} ms; "
             f"{raster_timing.shape_count} shapes"
         )
     if timings.tile_index_path:
@@ -120,7 +113,7 @@ def main() -> int:
     arguments = parse_arguments()
     print(WORKER_READY_MARKER, file=sys.stderr, flush=True)
     worker_started_at = time.perf_counter()
-    timings = PopulationTimings(calculation_method=arguments.method)
+    timings = PopulationTimings()
 
     try:
         if not arguments.raster:
@@ -134,7 +127,7 @@ def main() -> int:
                 arguments.tile_size,
                 Path(arguments.tile_index_root),
             )
-            results = engine.calculate(shapes, arguments.method, timings)
+            results = engine.calculate(shapes, timings)
         else:
             results = []
         output = json.dumps(results, allow_nan=False, separators=(",", ":"))

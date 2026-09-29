@@ -6,7 +6,6 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_PAUSE_MS = 2_000;
 
 const payload = {
-  targetPopulation: 1_000_000,
   shapes: [
     {
       id: "railway-load-test",

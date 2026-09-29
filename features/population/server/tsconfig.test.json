@@ -13,7 +13,6 @@
   "files": [
     "population-service-client.test.ts",
     "population-service-client.ts",
-    "calculation-mode.ts",
     "../types.ts"
   ]
 }
