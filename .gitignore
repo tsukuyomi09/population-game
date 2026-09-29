@@ -19,6 +19,7 @@
 /artifacts/account/tests/
 /artifacts/game/identity-tests/
 /artifacts/game/single-persistence-tests/
+/artifacts/leaderboard/tests/
 *.tif
 *.tiff
 *.vrt

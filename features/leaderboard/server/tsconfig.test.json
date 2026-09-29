@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "Node20",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../../..",
+    "outDir": "../../../artifacts/leaderboard/tests"
+  },
+  "files": [
+    "single-leaderboard.test.ts",
+    "single-leaderboard.ts",
+    "../../database/server/client.ts",
+    "../../game/single-player.ts"
+  ]
+}
