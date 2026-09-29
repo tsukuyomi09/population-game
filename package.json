@@ -16,6 +16,7 @@
     "prod:local:down": "node scripts/production-local.mjs down",
     "test:account": "tsc --project features/account/tsconfig.test.json && node --test artifacts/account/tests/features/account/account.test.js",
     "test:game-identity": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/runtime-player.test.js",
+    "test:single-persistence": "tsc --project features/game/server/tsconfig.test.json && node --test artifacts/game/single-persistence-tests/features/game/server/single-game-service.test.js",
     "test:population-adapter": "tsc --project features/population/server/tsconfig.test.json && node --test artifacts/population/adapter-tests/features/population/server/population-service-client.test.js"
   },
   "dependencies": {

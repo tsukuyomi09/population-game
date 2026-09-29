@@ -8,9 +8,12 @@ import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
-  calculateRoundScore,
+  type GameDifficulty,
   MAX_GAME_SCORE,
-  requestRoundStart,
+  requestGameAbandon,
+  requestGameStart,
+  requestNextRound,
+  requestRoundSubmission,
   ROUND_COUNT,
 } from "../game/game";
 import type { RuntimePlayerSummary } from "../game/runtime-player";
@@ -30,11 +33,14 @@ export function WorldMap() {
   const [isDrawReady, setIsDrawReady] = useState(false);
   const [runtimePlayer, setRuntimePlayer] =
     useState<RuntimePlayerSummary | null>(null);
+  const [runtimeGameId, setRuntimeGameId] = useState<string | null>(null);
+  const [difficulty, setDifficulty] = useState<GameDifficulty>("EASY");
   const [target, setTarget] = useState<number | null>(null);
   const [populationResponse, setPopulationResponse] =
     useState<PopulationResponse | null>(null);
   const [currentRound, setCurrentRound] = useState(0);
   const [roundScores, setRoundScores] = useState<number[]>([]);
+  const [totalScore, setTotalScore] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isTargetLoading, setIsTargetLoading] = useState(false);
   const [projection, setProjection] = useState<MapProjection>(
@@ -83,7 +89,9 @@ export function WorldMap() {
     setProjection(nextProjection);
   };
 
-  const loadTarget = async () => {
+  const loadRound = async (
+    requestRound: () => ReturnType<typeof requestGameStart>,
+  ) => {
     if (targetRequestPendingRef.current) return null;
 
     targetRequestPendingRef.current = true;
@@ -91,7 +99,7 @@ export function WorldMap() {
     const requestId = ++targetRequestRef.current;
 
     try {
-      const nextRound = await requestRoundStart();
+      const nextRound = await requestRound();
       return requestId === targetRequestRef.current ? nextRound : null;
     } finally {
       if (requestId === targetRequestRef.current) {
@@ -103,15 +111,18 @@ export function WorldMap() {
 
   const startGame = async () => {
     try {
-      const nextRound = await loadTarget();
+      const nextRound = await loadRound(() => requestGameStart(difficulty));
       if (nextRound === null) return;
 
       roundVersionRef.current += 1;
       setPopulationResponse(null);
       setRoundScores([]);
-      setCurrentRound(1);
+      setTotalScore(0);
+      setCurrentRound(nextRound.roundNumber);
       setTarget(nextRound.target);
       setRuntimePlayer(nextRound.player);
+      setRuntimeGameId(nextRound.runtimeGameId);
+      setDifficulty(nextRound.difficulty);
     } catch (error) {
       console.error("Game start failed:", error);
     }
@@ -126,25 +137,39 @@ export function WorldMap() {
     setIsTargetLoading(false);
     setPopulationResponse(null);
     setRoundScores([]);
+    setTotalScore(0);
     setCurrentRound(0);
     setTarget(null);
     setRuntimePlayer(null);
+    setRuntimeGameId(null);
   };
 
-  const abandonGame = () => {
+  const abandonGame = async () => {
+    if (runtimeGameId === null) return;
+
     const destination =
       runtimePlayer?.kind === "registered" ? "/profile" : "/";
 
-    resetGame();
-    router.push(destination);
+    try {
+      await requestGameAbandon(runtimeGameId);
+      resetGame();
+      router.push(destination);
+    } catch (error) {
+      console.error("Game abandon failed:", error);
+    }
   };
 
   const nextRound = async () => {
+    if (runtimeGameId === null) return;
+
     try {
-      const nextRound = await loadTarget();
+      const nextRound = await loadRound(() => requestNextRound(runtimeGameId));
       if (nextRound === null || runtimePlayer === null) return;
 
-      if (nextRound.player.runtimePlayerId !== runtimePlayer.runtimePlayerId) {
+      if (
+        nextRound.runtimeGameId !== runtimeGameId ||
+        nextRound.player.runtimePlayerId !== runtimePlayer.runtimePlayerId
+      ) {
         throw new Error("Game session identity changed during an active game.");
       }
 
@@ -153,14 +178,21 @@ export function WorldMap() {
       setIsSubmitting(false);
       setPopulationResponse(null);
       setTarget(nextRound.target);
-      setCurrentRound((round) => round + 1);
+      setCurrentRound(nextRound.roundNumber);
     } catch (error) {
       console.error("Game start failed:", error);
     }
   };
 
   const submitPolygons = async () => {
-    if (target === null || populationResponse !== null || isSubmitting) return;
+    if (
+      target === null ||
+      runtimeGameId === null ||
+      populationResponse !== null ||
+      isSubmitting
+    ) {
+      return;
+    }
 
     const roundVersion = roundVersionRef.current;
     const drawings = drawRef.current?.getDrawings();
@@ -186,29 +218,18 @@ export function WorldMap() {
         }),
       };
 
-      const response = await fetch("/api/population", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        const message = await response.text();
-        throw new Error(
-          `Population request failed (${response.status}): ${message || response.statusText}`,
-        );
-      }
-
-      const populationResponse = (await response.json()) as PopulationResponse;
+      const submission = await requestRoundSubmission(
+        runtimeGameId,
+        requestBody.shapes,
+      );
 
       if (roundVersion !== roundVersionRef.current) return;
 
-      const roundScore = calculateRoundScore(
-        populationResponse.totalPopulation,
-        target,
-      );
+      const populationResponse = submission.population;
+      const roundScore = submission.roundScore;
       setPopulationResponse(populationResponse);
       setRoundScores((scores) => [...scores, roundScore]);
+      setTotalScore(submission.totalScore);
       console.log("Population response:", populationResponse);
       populationResponse.results.forEach((result) => {
         console.log("Population result:", result);
@@ -221,7 +242,7 @@ export function WorldMap() {
     }
   };
 
-  const accumulatedScore = roundScores.reduce((total, score) => total + score, 0);
+  const accumulatedScore = totalScore;
   const currentRoundScore =
     populationResponse !== null ? (roundScores[currentRound - 1] ?? null) : null;
 
@@ -332,14 +353,39 @@ export function WorldMap() {
       )}
       {runtimePlayer === null && (
         <div className="fixed inset-0 z-10 grid place-items-center bg-black/50">
-          <Button
-            type="button"
-            onClick={startGame}
-            disabled={isTargetLoading}
-            className="h-auto cursor-pointer rounded-[10px] border-2 border-white bg-[linear-gradient(180deg,#38bdf8,#0369a1)] px-12 py-[18px] text-[28px] font-extrabold tracking-[0.18em] text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.35)] shadow-[0_8px_24px_rgba(0,0,0,0.45)] hover:bg-[linear-gradient(180deg,#38bdf8,#0369a1)] disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
-          >
-            PLAY
-          </Button>
+          <div className="text-center">
+            <div
+              role="group"
+              aria-label="Game difficulty"
+              className="mb-4 flex justify-center overflow-hidden rounded-md border border-white bg-white"
+            >
+              {(["EASY", "REAL"] as const).map((option) => (
+                <Button
+                  key={option}
+                  type="button"
+                  onClick={() => setDifficulty(option)}
+                  aria-pressed={difficulty === option}
+                  variant="ghost"
+                  className={cn(
+                    "h-auto rounded-none px-5 py-2 font-bold",
+                    difficulty === option
+                      ? "bg-black text-white hover:bg-black hover:text-white"
+                      : "bg-white text-black hover:bg-white hover:text-black",
+                  )}
+                >
+                  {option}
+                </Button>
+              ))}
+            </div>
+            <Button
+              type="button"
+              onClick={startGame}
+              disabled={isTargetLoading}
+              className="h-auto cursor-pointer rounded-[10px] border-2 border-white bg-[linear-gradient(180deg,#38bdf8,#0369a1)] px-12 py-[18px] text-[28px] font-extrabold tracking-[0.18em] text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.35)] shadow-[0_8px_24px_rgba(0,0,0,0.45)] hover:bg-[linear-gradient(180deg,#38bdf8,#0369a1)] disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
+            >
+              PLAY
+            </Button>
+          </div>
         </div>
       )}
     </>

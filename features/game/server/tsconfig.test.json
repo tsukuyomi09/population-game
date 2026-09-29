@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "Node20",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../../..",
+    "outDir": "../../../artifacts/game/single-persistence-tests"
+  },
+  "files": [
+    "single-game-service.test.ts",
+    "single-game-service.ts",
+    "../runtime-player.ts",
+    "../single-player.ts"
+  ]
+}
