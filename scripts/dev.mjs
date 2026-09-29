@@ -44,22 +44,20 @@ const developmentEnvironment = {
     process.env.POPULATION_SERVICE_URL ?? `http://127.0.0.1:${servicePort}`,
 };
 
-const commands = [
-  {
-    name: "population",
-    command: pythonExecutable,
-    args: [path.join(root, "tools/population/service.py")],
-  },
-  {
-    name: "web",
-    command: process.execPath,
-    args: [require.resolve("next/dist/bin/next"), "dev"],
-  },
-];
+const populationCommand = {
+  name: "population",
+  command: pythonExecutable,
+  args: [path.join(root, "tools/population/service.py")],
+};
+
+const webCommand = {
+  name: "web",
+  command: process.execPath,
+  args: [require.resolve("next/dist/bin/next"), "dev"],
+};
 
 const children = [];
 let shuttingDown = false;
-let remainingChildren = commands.length;
 let finalExitCode = 0;
 let forceShutdownTimer;
 
@@ -87,16 +85,18 @@ function shutdown(signal, exitCode) {
   forceShutdownTimer = setTimeout(() => {
     for (const child of children) signalChild(child, "SIGKILL");
   }, 5_000);
+
   forceShutdownTimer.unref();
 }
 
-for (const command of commands) {
+function startChild(command) {
   const child = spawn(command.command, command.args, {
     cwd: root,
     detached: process.platform !== "win32",
     env: developmentEnvironment,
     stdio: "inherit",
   });
+
   children.push(child);
 
   child.on("error", (error) => {
@@ -105,8 +105,6 @@ for (const command of commands) {
   });
 
   child.on("close", (code, signal) => {
-    remainingChildren -= 1;
-
     if (!shuttingDown) {
       console.error(
         `${command.name} exited ${signal ? `with ${signal}` : `with code ${code}`}.`,
@@ -114,12 +112,52 @@ for (const command of commands) {
       shutdown("SIGTERM", code ?? 1);
     }
 
-    if (remainingChildren === 0) {
+    if (children.every(
+      (child) => child.exitCode !== null || child.signalCode !== null,
+    )) {
       clearTimeout(forceShutdownTimer);
       process.exitCode = finalExitCode;
     }
   });
+
+  return child;
 }
+
+async function waitForPopulationReady() {
+  const readyUrl = `http://127.0.0.1:${servicePort}/ready`;
+
+  console.log("Waiting for population service to become ready...");
+
+  while (!shuttingDown) {
+    try {
+      const response = await fetch(readyUrl);
+
+      if (response.ok) {
+        console.log("Population service ready. Starting Next.js...");
+        return;
+      }
+    } catch {
+      // Service is still starting.
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+async function startDevelopment() {
+  startChild(populationCommand);
+
+  await waitForPopulationReady();
+
+  if (!shuttingDown) {
+    startChild(webCommand);
+  }
+}
+
+startDevelopment().catch((error) => {
+  console.error("Development startup failed:", error);
+  shutdown("SIGTERM", 1);
+});
 
 process.on("SIGINT", () => shutdown("SIGINT", 0));
 process.on("SIGTERM", () => shutdown("SIGTERM", 0));
