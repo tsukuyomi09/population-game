@@ -4,8 +4,8 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "World Map",
-  description: "An interactive world map",
+  title: "Worldrawing",
+  description: "Estimate populations by drawing on the world map.",
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {

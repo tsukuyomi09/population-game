@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Map as MapLibreMap } from "maplibre-gl";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
@@ -22,6 +23,7 @@ import {
 } from "./map";
 
 export function WorldMap() {
+  const router = useRouter();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapLibreMap>(null);
   const drawRef = useRef<DrawController>(null);
@@ -115,7 +117,7 @@ export function WorldMap() {
     }
   };
 
-  const abandonGame = () => {
+  const resetGame = () => {
     roundVersionRef.current += 1;
     targetRequestRef.current += 1;
     targetRequestPendingRef.current = false;
@@ -127,6 +129,14 @@ export function WorldMap() {
     setCurrentRound(0);
     setTarget(null);
     setRuntimePlayer(null);
+  };
+
+  const abandonGame = () => {
+    const destination =
+      runtimePlayer?.kind === "registered" ? "/profile" : "/";
+
+    resetGame();
+    router.push(destination);
   };
 
   const nextRound = async () => {
@@ -310,7 +320,7 @@ export function WorldMap() {
               </div>
               <Button
                 type="button"
-                onClick={abandonGame}
+                onClick={resetGame}
                 variant="outline"
                 className="mt-4 h-auto cursor-pointer rounded-[4px] border-white bg-white px-4 py-2 font-bold text-black shadow-none hover:bg-white"
               >
