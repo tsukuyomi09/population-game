@@ -9,7 +9,6 @@ import {
   Layers3,
   RotateCcw,
   Target,
-  Trophy,
 } from "lucide-react";
 import {
   GoogleDrawingMapAdapter,
@@ -93,6 +92,120 @@ function AnimatedNumber({ value, className }: { value: number; className?: strin
   return <span className={className}>{integerFormatter.format(displayValue)}</span>;
 }
 
+function scoreRevealTone(score: number) {
+  if (score === MAX_ROUND_SCORE) {
+    return {
+      score: "text-yellow-100 drop-shadow-[0_0_16px_rgba(254,240,138,0.55)]",
+      track: "bg-black/80 ring-2 ring-yellow-200/50",
+      bar: "bg-gradient-to-r from-emerald-400 via-lime-300 to-yellow-100 shadow-[0_0_22px_rgba(190,242,100,0.9)]",
+    };
+  }
+  if (score >= 9_500) {
+    return {
+      score: "text-emerald-100",
+      track: "bg-black/80",
+      bar: "bg-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.7)]",
+    };
+  }
+  if (score >= 8_500) {
+    return {
+      score: "text-sky-100",
+      track: "bg-black/80",
+      bar: "bg-sky-400 shadow-[0_0_18px_rgba(56,189,248,0.65)]",
+    };
+  }
+  if (score >= 6_500) {
+    return {
+      score: "text-violet-100",
+      track: "bg-black/80",
+      bar: "bg-violet-400 shadow-[0_0_18px_rgba(167,139,250,0.65)]",
+    };
+  }
+  if (score > 0) {
+    return {
+      score: "text-amber-100",
+      track: "bg-black/80",
+      bar: "bg-amber-400 shadow-[0_0_18px_rgba(251,191,36,0.6)]",
+    };
+  }
+  return {
+    score: "text-red-100",
+    track: "bg-black/80",
+    bar: "bg-red-400",
+  };
+}
+
+function ScoreReveal({ score }: { score: number }) {
+  const finalRatio = Math.min(1, Math.max(0, score / MAX_ROUND_SCORE));
+  const [reveal, setReveal] = useState({ score: 0, ratio: 0 });
+  const tone = scoreRevealTone(score);
+
+  useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setReveal({ score, ratio: finalRatio });
+      return;
+    }
+
+    setReveal({ score: 0, ratio: 0 });
+    let startedAt: number | null = null;
+    let animationFrame = 0;
+    const duration = 2_400;
+
+    const update = (now: number) => {
+      startedAt ??= now;
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 4);
+
+      setReveal({
+        score: progress === 1 ? score : Math.round(score * eased),
+        ratio: progress === 1 ? finalRatio : finalRatio * eased,
+      });
+
+      if (progress < 1) animationFrame = requestAnimationFrame(update);
+    };
+
+    animationFrame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [finalRatio, score]);
+
+  return (
+    <div className="w-full">
+      <div className="flex items-baseline justify-center gap-2">
+        <span
+          className={cn(
+            "font-mono text-5xl leading-none font-black tracking-tight sm:text-6xl",
+            tone.score,
+          )}
+        >
+          {integerFormatter.format(reveal.score)}
+        </span>
+        <span className="font-mono text-xs font-bold text-white/55">
+          / {integerFormatter.format(MAX_ROUND_SCORE)}
+        </span>
+      </div>
+      <div
+        role="progressbar"
+        aria-label="Round score"
+        aria-valuemin={0}
+        aria-valuemax={MAX_ROUND_SCORE}
+        aria-valuenow={reveal.score}
+        className={cn(
+          "mt-4 h-[1.125rem] overflow-hidden rounded-full border border-white/15 shadow-inner",
+          tone.track,
+        )}
+      >
+        <div
+          className={cn(
+            "h-full origin-left rounded-full will-change-transform",
+            tone.bar,
+          )}
+          style={{ transform: `scaleX(${reveal.ratio})` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function resultBadge(score: number, difference: number) {
   const scoreBadge = RESULT_BADGE_THRESHOLDS.find(
     ({ minimumScore }) => score >= minimumScore,
@@ -118,7 +231,44 @@ function resultBadge(score: number, difference: number) {
   };
 }
 
-function ScoreProgress({ scores }: { scores: number[] }) {
+function ScoreProgress({
+  scores,
+  compact = false,
+}: {
+  scores: number[];
+  compact?: boolean;
+}) {
+  if (compact) {
+    return (
+      <ol className="grid grid-cols-5 gap-2" aria-label="Round scores">
+        {Array.from({ length: ROUND_COUNT }, (_, index) => {
+          const score = scores[index];
+          const ratio = score === undefined ? 0 : score / MAX_ROUND_SCORE;
+
+          return (
+            <li key={index} className="min-w-0 text-center">
+              <div className="h-1 overflow-hidden rounded-full bg-black/65">
+                <div
+                  className={cn(
+                    "h-full rounded-full",
+                    score === MAX_ROUND_SCORE ? "bg-yellow-200" : "bg-primary/75",
+                  )}
+                  style={{ width: `${ratio * 100}%` }}
+                />
+              </div>
+              <span className="mt-1 block text-[0.5rem] font-bold tracking-wider text-white/65">
+                R{index + 1}
+              </span>
+              <span className="block truncate font-mono text-[0.6rem] font-black text-white/95">
+                {score === undefined ? "—" : integerFormatter.format(score)}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    );
+  }
+
   return (
     <ol className="grid grid-cols-5 gap-2" aria-label="Round scores">
       {Array.from({ length: ROUND_COUNT }, (_, index) => {
@@ -427,10 +577,6 @@ export function WorldMap({
     calculatedPopulation === null || target === null
       ? null
       : calculatedPopulation - target;
-  const percentageError =
-    difference === null || target === null
-      ? null
-      : (Math.abs(difference) / target) * 100;
   const badge =
     currentRoundScore === null || difference === null
       ? null
@@ -465,50 +611,50 @@ export function WorldMap({
           target !== null &&
           populationResponse === null && (
             <>
-              <section className="fixed top-3 left-3 z-20 w-[calc(100vw-7.5rem)] max-w-[25rem] rounded-xl border border-white/10 bg-background/90 px-4 py-3 text-foreground shadow-xl backdrop-blur-md sm:left-1/2 sm:w-full sm:-translate-x-1/2">
-                <div className="flex items-center justify-between gap-3 text-[0.65rem] font-black tracking-[0.16em] uppercase">
-                  <span
-                    className={
-                      difficulty === "EASY" ? "text-primary" : "text-sky-300"
-                    }
-                  >
-                    {difficulty}
-                  </span>
-                  <span className="text-muted-foreground">
-                    Round {currentRound}/{ROUND_COUNT}
-                  </span>
+              <div className="fixed top-3 left-3 z-20 flex items-center gap-2 rounded-full border border-white/10 bg-background/90 px-3 py-2 text-[0.65rem] font-black tracking-[0.14em] text-foreground uppercase shadow-lg backdrop-blur-md">
+                <span
+                  className={
+                    difficulty === "EASY" ? "text-primary" : "text-sky-300"
+                  }
+                >
+                  {difficulty}
+                </span>
+                <span className="size-1 rounded-full bg-white/25" />
+                <span className="text-muted-foreground">
+                  R{currentRound}/{ROUND_COUNT}
+                </span>
+              </div>
+
+              <section className="fixed top-14 left-1/2 z-20 -translate-x-1/2 rounded-xl border border-primary/20 bg-background/92 px-4 py-2 text-center text-foreground shadow-xl backdrop-blur-md md:top-3">
+                <div className="flex items-center justify-center gap-1.5 text-[0.56rem] font-black tracking-[0.16em] text-primary uppercase">
+                  <Target className="size-3" aria-hidden="true" />
+                  Target
                 </div>
-                <div className="mt-2 flex items-end justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-1.5 text-[0.62rem] font-bold tracking-[0.16em] text-muted-foreground uppercase">
-                      <Target className="size-3" aria-hidden="true" />
-                      Target population
-                    </div>
-                    <div className="mt-0.5 font-mono text-2xl font-black tracking-tight sm:text-3xl">
-                      {integerFormatter.format(target)}
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <div className="text-[0.62rem] font-bold tracking-[0.14em] text-muted-foreground uppercase">
-                      Total
-                    </div>
-                    <AnimatedNumber
-                      value={accumulatedScore}
-                      className="font-mono text-base font-black"
-                    />
-                  </div>
+                <div className="font-mono text-2xl leading-none font-black tracking-tight">
+                  {integerFormatter.format(target)}
                 </div>
               </section>
 
-              <Button
-                type="button"
-                onClick={abandonGame}
-                variant="ghost"
-                size="sm"
-                className="fixed top-3 right-3 z-20 border border-white/10 bg-background/80 text-xs text-muted-foreground shadow-lg backdrop-blur-md hover:bg-background hover:text-foreground"
-              >
-                Abandon
-              </Button>
+              <div className="fixed top-3 right-3 z-20 flex items-center gap-2">
+                <div className="rounded-full border border-sky-300/20 bg-background/90 px-3 py-1.5 text-right text-foreground shadow-lg backdrop-blur-md">
+                  <div className="text-[0.5rem] font-black tracking-[0.14em] text-sky-300 uppercase">
+                    Total
+                  </div>
+                  <AnimatedNumber
+                    value={accumulatedScore}
+                    className="block font-mono text-sm leading-none font-black"
+                  />
+                </div>
+                <Button
+                  type="button"
+                  onClick={abandonGame}
+                  variant="ghost"
+                  size="sm"
+                  className="border border-white/10 bg-background/75 text-xs text-muted-foreground shadow-lg backdrop-blur-md hover:bg-background hover:text-foreground"
+                >
+                  Abandon
+                </Button>
+              </div>
 
               <div className="fixed bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-white/10 bg-background/90 p-2 pl-3 text-foreground shadow-2xl backdrop-blur-md">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
@@ -535,108 +681,50 @@ export function WorldMap({
           target !== null &&
           calculatedPopulation !== null &&
           difference !== null &&
-          percentageError !== null &&
           badge !== null &&
           !isFinalResult && (
-            <section className="animate-in fade-in slide-in-from-bottom-4 fixed inset-x-3 bottom-3 z-30 max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-2xl border border-white/10 bg-background/95 p-5 text-foreground shadow-2xl backdrop-blur-md duration-300 sm:inset-x-auto sm:top-3 sm:right-3 sm:bottom-auto sm:w-[25rem] sm:p-6">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-[0.65rem] font-black tracking-[0.17em] text-muted-foreground uppercase">
-                    {difficulty} · Round {currentRound}/{ROUND_COUNT}
-                  </p>
-                  <span
-                    className={cn(
-                      "mt-2 inline-flex rounded-full border px-2.5 py-1 text-[0.68rem] font-black tracking-[0.14em]",
-                      badge.className,
-                    )}
-                  >
-                    {badge.label}
-                  </span>
-                </div>
-                <Trophy className="size-7 text-primary" aria-hidden="true" />
-              </div>
+            <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/35 p-4 text-foreground duration-300">
+              <section className="animate-in zoom-in-95 my-auto w-full max-w-lg px-2 py-5 text-center duration-300 sm:px-5">
+                <span
+                  className={cn(
+                    "inline-flex rounded-full border px-3 py-1 text-[0.68rem] font-black tracking-[0.16em]",
+                    badge.className,
+                  )}
+                >
+                  {badge.label}
+                </span>
 
-              <dl className="mt-6 grid grid-cols-2 gap-x-5 gap-y-4">
-                <div>
-                  <dt className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
-                    Target
-                  </dt>
-                  <dd className="mt-1 font-mono text-lg font-black">
-                    {integerFormatter.format(target)}
-                  </dd>
+                <div className="mt-5">
+                  <ScoreReveal score={currentRoundScore} />
                 </div>
-                <div className="text-right">
-                  <dt className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
-                    Your population
-                  </dt>
-                  <dd className="mt-1 font-mono text-lg font-black">
+
+                <p className="mt-5 inline-flex max-w-full items-center justify-center gap-2 rounded-full bg-black/60 px-3 py-1.5 font-mono text-xs shadow-lg backdrop-blur-sm sm:text-sm">
+                  <span className="text-white/75">You</span>
+                  <span className="truncate font-black text-white">
                     {integerFormatter.format(calculatedPopulation)}
-                  </dd>
-                </div>
-                <div className="col-span-2 flex items-center justify-between border-t border-border pt-4 text-sm">
-                  <dt className="text-muted-foreground">
-                    {difference === 0
-                      ? "Exactly on target"
-                      : difference > 0
-                        ? "Over target"
-                        : "Under target"}
-                  </dt>
-                  <dd className="font-mono font-black">
-                    {difference === 0 ? "—" : integerFormatter.format(Math.abs(difference))}
-                    <span className="ml-2 text-muted-foreground">
-                      ({percentageError < 10
-                        ? percentageError.toFixed(1)
-                        : Math.round(percentageError)}
-                      %)
-                    </span>
-                  </dd>
-                </div>
-              </dl>
+                  </span>
+                  <span className="text-white/55">vs</span>
+                  <span className="text-white/75">Target</span>
+                  <span className="truncate font-black text-white">
+                    {integerFormatter.format(target)}
+                  </span>
+                </p>
 
-              <div className="mt-5 grid grid-cols-2 gap-3 rounded-xl border border-border bg-card p-4">
-                <div>
-                  <p className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
-                    Round score
-                  </p>
-                  <AnimatedNumber
-                    value={currentRoundScore}
-                    className="mt-1 block font-mono text-3xl font-black text-primary"
-                  />
+                <div className="mx-auto mt-5 max-w-sm">
+                  <ScoreProgress scores={roundScores} compact />
                 </div>
-                <div className="border-l border-border pl-4">
-                  <p className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
-                    Total score
-                  </p>
-                  <AnimatedNumber
-                    value={accumulatedScore}
-                    className="mt-1 block font-mono text-3xl font-black"
-                  />
-                </div>
-              </div>
 
-              <div className="mt-5">
-                <ScoreProgress scores={roundScores} />
-              </div>
-
-              <Button
-                type="button"
-                onClick={nextRound}
-                disabled={isTargetLoading}
-                className="mt-6 h-11 w-full font-black"
-              >
-                {isTargetLoading ? "Loading…" : "Next round"}
-                {!isTargetLoading && <ChevronRight aria-hidden="true" />}
-              </Button>
-              <Button
-                type="button"
-                onClick={abandonGame}
-                variant="ghost"
-                size="sm"
-                className="mt-2 w-full text-muted-foreground"
-              >
-                Abandon game
-              </Button>
-            </section>
+                <Button
+                  type="button"
+                  onClick={nextRound}
+                  disabled={isTargetLoading}
+                  className="mt-6 h-11 w-full max-w-56 font-black shadow-xl"
+                >
+                  {isTargetLoading ? "Loading…" : "Next round"}
+                  {!isTargetLoading && <ChevronRight aria-hidden="true" />}
+                </Button>
+              </section>
+            </div>
           )}
 
         {isFinalResult && (

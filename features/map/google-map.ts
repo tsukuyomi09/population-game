@@ -12,6 +12,12 @@ declare global {
 
 const SCRIPT_ID = "worldrawing-google-maps";
 const CALLBACK_NAME = "__worldrawingGoogleMapsReady";
+const WORLD_BOUNDS = {
+  north: 85.05112878,
+  south: -85.05112878,
+  east: 179.999999,
+  west: -179.999999,
+};
 let googleMapsPromise: Promise<GoogleMapsNamespace> | null = null;
 
 export function loadGoogleMaps(apiKey: string) {
@@ -60,8 +66,12 @@ export function createGoogleWorldMap(
   maps: GoogleMapsNamespace,
 ): GoogleMap {
   return new maps.Map(container, {
-    center: { lat: 36.25956997955441, lng: 137.9150899566626 },
+    center: { lat: 0, lng: 0 },
     zoom: 1,
+    restriction: {
+      latLngBounds: WORLD_BOUNDS,
+      strictBounds: true,
+    },
     mapTypeId: maps.MapTypeId.ROADMAP,
     renderingType: maps.RenderingType.VECTOR,
     tilt: 0,
