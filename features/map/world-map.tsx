@@ -14,9 +14,7 @@ import {
 import {
   GoogleDrawingMapAdapter,
   type GoogleMap,
-  type GoogleMapsEventListener,
   type GoogleMapsNamespace,
-  type GoogleRenderingType,
 } from "./google-drawing-map-adapter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -159,11 +157,7 @@ export function WorldMap({
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<GoogleMap>(null);
   const drawRef = useRef<DrawController>(null);
-  const mapCreationCountRef = useRef(0);
   const [isDrawReady, setIsDrawReady] = useState(false);
-  const [mapCreationCount, setMapCreationCount] = useState(0);
-  const [renderingType, setRenderingType] =
-    useState<GoogleRenderingType>("UNINITIALIZED");
   const [mapError, setMapError] = useState<string | null>(null);
   const [runtimePlayer, setRuntimePlayer] =
     useState<RuntimePlayerSummary | null>(null);
@@ -203,7 +197,6 @@ export function WorldMap({
     let maps: GoogleMapsNamespace | null = null;
     let adapter: GoogleDrawingMapAdapter | null = null;
     let drawing: DrawController | null = null;
-    let tilesLoadedListener: GoogleMapsEventListener | null = null;
 
     loadGoogleMaps(apiKey)
       .then((loadedMaps) => {
@@ -212,18 +205,6 @@ export function WorldMap({
         maps = loadedMaps;
         map = createGoogleWorldMap(container, loadedMaps);
         mapRef.current = map;
-        mapCreationCountRef.current += 1;
-        setMapCreationCount(mapCreationCountRef.current);
-        setRenderingType(map.getRenderingType());
-
-        tilesLoadedListener = loadedMaps.event.addListenerOnce(
-          map,
-          "tilesloaded",
-          () => {
-            if (!map || cancelled) return;
-            setRenderingType(map.getRenderingType());
-          },
-        );
 
         adapter = new GoogleDrawingMapAdapter({
           container,
@@ -251,7 +232,6 @@ export function WorldMap({
 
     return () => {
       cancelled = true;
-      tilesLoadedListener?.remove();
       drawing?.stop();
       adapter?.stop();
       if (map && maps) maps.event.clearInstanceListeners(map);
@@ -481,13 +461,6 @@ export function WorldMap({
             {mapError}
           </div>
         )}
-        {process.env.NODE_ENV === "development" && (
-          <aside className="pointer-events-none fixed right-3 bottom-3 z-10 rounded-md bg-black/75 px-3 py-2 font-mono text-[0.65rem] text-white shadow">
-            <div>Google rendering: {renderingType}</div>
-            <div>Map creations: {mapCreationCount}</div>
-          </aside>
-        )}
-
         {runtimePlayer !== null &&
           target !== null &&
           populationResponse === null && (
