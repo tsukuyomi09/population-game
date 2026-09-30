@@ -1,8 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import type { Map as MapLibreMap } from "maplibre-gl";
 import { useRouter } from "next/navigation";
+import {
+  GoogleDrawingMapAdapter,
+  type GoogleMap,
+  type GoogleMapsEventListener,
+  type GoogleMapsNamespace,
+  type GoogleRenderingType,
+} from "./google-drawing-map-adapter";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
@@ -18,19 +24,19 @@ import {
 } from "../game/game";
 import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type { PopulationRequest, PopulationResponse } from "../population/types";
-import {
-  createMap,
-  DEFAULT_MAP_PROJECTION,
-  setMapProjection,
-  type MapProjection,
-} from "./map";
+import { createGoogleWorldMap, loadGoogleMaps } from "./google-map";
 
 export function WorldMap() {
   const router = useRouter();
   const mapContainer = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<MapLibreMap>(null);
+  const mapRef = useRef<GoogleMap>(null);
   const drawRef = useRef<DrawController>(null);
+  const mapCreationCountRef = useRef(0);
   const [isDrawReady, setIsDrawReady] = useState(false);
+  const [mapCreationCount, setMapCreationCount] = useState(0);
+  const [renderingType, setRenderingType] =
+    useState<GoogleRenderingType>("UNINITIALIZED");
+  const [mapError, setMapError] = useState<string | null>(null);
   const [runtimePlayer, setRuntimePlayer] =
     useState<RuntimePlayerSummary | null>(null);
   const [runtimeGameId, setRuntimeGameId] = useState<string | null>(null);
@@ -43,51 +49,82 @@ export function WorldMap() {
   const [totalScore, setTotalScore] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isTargetLoading, setIsTargetLoading] = useState(false);
-  const [projection, setProjection] = useState<MapProjection>(
-    DEFAULT_MAP_PROJECTION,
-  );
   const roundVersionRef = useRef(0);
   const targetRequestRef = useRef(0);
   const targetRequestPendingRef = useRef(false);
+  const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
   useEffect(() => {
-    if (!mapContainer.current) return;
+    const container = mapContainer.current;
+    if (!container) return;
 
-    const map = createMap(mapContainer.current);
-    mapRef.current = map;
+    if (!apiKey) {
+      setMapError("Missing NEXT_PUBLIC_GOOGLE_MAPS_API_KEY");
+      return;
+    }
+
+    let cancelled = false;
+    let map: GoogleMap | null = null;
+    let maps: GoogleMapsNamespace | null = null;
+    let adapter: GoogleDrawingMapAdapter | null = null;
     let drawing: DrawController | null = null;
+    let tilesLoadedListener: GoogleMapsEventListener | null = null;
 
-    const initializeDrawing = () => {
-      if (drawing) return;
+    loadGoogleMaps(apiKey)
+      .then((loadedMaps) => {
+        if (cancelled) return;
 
-      drawing = createDraw({
-        map,
-        onReady: () => setIsDrawReady(true),
+        maps = loadedMaps;
+        map = createGoogleWorldMap(container, loadedMaps);
+        mapRef.current = map;
+        mapCreationCountRef.current += 1;
+        setMapCreationCount(mapCreationCountRef.current);
+        setRenderingType(map.getRenderingType());
+
+        tilesLoadedListener = loadedMaps.event.addListenerOnce(
+          map,
+          "tilesloaded",
+          () => {
+            if (!map || cancelled) return;
+            setRenderingType(map.getRenderingType());
+          },
+        );
+
+        adapter = new GoogleDrawingMapAdapter({
+          container,
+          map,
+          maps: loadedMaps,
+          onCompletedDrawingCountChange: () => undefined,
+          onModeChange: () => undefined,
+        });
+
+        return adapter.whenReady().then(() => {
+          if (cancelled || !adapter) return;
+          drawing = createDraw({
+            map: adapter.asMapLibreMap(),
+            onReady: () => setIsDrawReady(true),
+          });
+          drawRef.current = drawing;
+        });
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setMapError(
+          error instanceof Error ? error.message : "Google Maps failed to load.",
+        );
       });
-      drawRef.current = drawing;
-    };
-
-    map.on("style.load", initializeDrawing);
 
     return () => {
-      map.off("style.load", initializeDrawing);
+      cancelled = true;
+      tilesLoadedListener?.remove();
       drawing?.stop();
+      adapter?.stop();
+      if (map && maps) maps.event.clearInstanceListeners(map);
       drawRef.current = null;
       mapRef.current = null;
-      map.remove();
+      container.replaceChildren();
     };
-  }, []);
-
-  const changeProjection = (nextProjection: MapProjection) => {
-    const map = mapRef.current;
-    if (!map || nextProjection === projection) return;
-
-    setMapProjection(map, nextProjection);
-    drawRef.current?.setProjection(
-      nextProjection === "globe" ? "globe" : "web-mercator",
-    );
-    setProjection(nextProjection);
-  };
+  }, [apiKey]);
 
   const loadRound = async (
     requestRound: () => ReturnType<typeof requestGameStart>,
@@ -249,6 +286,17 @@ export function WorldMap() {
   return (
     <>
       <main ref={mapContainer} className="h-screen w-screen" />
+      {mapError !== null && (
+        <div className="fixed inset-x-4 top-4 z-20 rounded bg-red-950 px-4 py-3 text-center text-sm text-red-100">
+          {mapError}
+        </div>
+      )}
+      {process.env.NODE_ENV === "development" && (
+        <aside className="pointer-events-none fixed right-3 bottom-3 z-10 rounded bg-black/80 px-3 py-2 font-mono text-xs text-white shadow">
+          <div>Google rendering: {renderingType}</div>
+          <div>Map creations: {mapCreationCount}</div>
+        </aside>
+      )}
       <Button
         type="button"
         onClick={submitPolygons}
@@ -258,34 +306,6 @@ export function WorldMap() {
       >
         Submit
       </Button>
-      <div
-        role="group"
-        aria-label="Map projection"
-        className="fixed right-4 bottom-4 z-[1] flex overflow-hidden rounded-[4px] border border-[#777] bg-white"
-      >
-        {(["mercator", "globe"] as const).map((option) => {
-          const isActive = projection === option;
-
-          return (
-            <Button
-              key={option}
-              type="button"
-              onClick={() => changeProjection(option)}
-              disabled={!isDrawReady}
-              aria-pressed={isActive}
-              variant="ghost"
-              className={cn(
-                "h-auto cursor-pointer rounded-none border-0 px-[10px] py-[7px] text-[11px] font-bold shadow-none disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100",
-                isActive
-                  ? "bg-[#111] text-white hover:bg-[#111] hover:text-white"
-                  : "bg-white text-black hover:bg-white hover:text-black",
-              )}
-            >
-              {option === "mercator" ? "2D" : "GLOBE"}
-            </Button>
-          );
-        })}
-      </div>
       {target !== null && (
         <>
           <div className="fixed top-4 left-1/2 z-[1] -translate-x-1/2 rounded-[8px] bg-black/[0.65] px-[18px] py-2 text-center text-white">
