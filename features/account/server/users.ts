@@ -74,6 +74,19 @@ export async function createUser(input: {
   return result.rows[0];
 }
 
+export async function updateUserAvatar(userId: string, avatarId: AvatarId) {
+  const result = await databasePool().query(
+    `
+      UPDATE users
+      SET avatar_id = $2, updated_at = now()
+      WHERE id = $1
+    `,
+    [userId, avatarId],
+  );
+
+  return result.rowCount === 1;
+}
+
 export function isUniqueConstraintError(
   error: unknown,
   constraint: string,

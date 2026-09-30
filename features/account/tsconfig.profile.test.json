@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "Node20",
+    "types": ["node"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "rootDir": "../..",
+    "outDir": "../../artifacts/account/profile-tests"
+  },
+  "files": [
+    "profile.test.ts",
+    "server/account-deletion.ts",
+    "server/profile-stats.ts",
+    "../database/server/client.ts",
+    "../game/single-player.ts"
+  ]
+}

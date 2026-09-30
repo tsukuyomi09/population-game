@@ -1,7 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import {
+  ArrowLeft,
+  ChevronRight,
+  Layers3,
+  RotateCcw,
+  Target,
+  Trophy,
+} from "lucide-react";
 import {
   GoogleDrawingMapAdapter,
   type GoogleMap,
@@ -16,6 +25,7 @@ import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
   type GameDifficulty,
   MAX_GAME_SCORE,
+  MAX_ROUND_SCORE,
   requestGameAbandon,
   requestGameStart,
   requestNextRound,
@@ -26,7 +36,125 @@ import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type { PopulationRequest, PopulationResponse } from "../population/types";
 import { createGoogleWorldMap, loadGoogleMaps } from "./google-map";
 
-export function WorldMap() {
+const RESULT_BADGE_THRESHOLDS = [
+  {
+    minimumScore: MAX_ROUND_SCORE,
+    label: "PERFECT",
+    className: "border-primary/40 bg-primary/15 text-primary",
+  },
+  {
+    minimumScore: 9_500,
+    label: "NAILED IT",
+    className: "border-emerald-300/35 bg-emerald-300/12 text-emerald-200",
+  },
+  {
+    minimumScore: 8_500,
+    label: "SO CLOSE",
+    className: "border-sky-300/35 bg-sky-300/12 text-sky-200",
+  },
+  {
+    minimumScore: 6_500,
+    label: "NICE",
+    className: "border-violet-300/35 bg-violet-300/12 text-violet-200",
+  },
+] as const;
+
+const integerFormatter = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 0,
+});
+
+function AnimatedNumber({ value, className }: { value: number; className?: string }) {
+  const previousValueRef = useRef(0);
+  const [displayValue, setDisplayValue] = useState(0);
+
+  useEffect(() => {
+    const from = previousValueRef.current;
+    previousValueRef.current = value;
+
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setDisplayValue(value);
+      return;
+    }
+
+    const startedAt = performance.now();
+    const duration = 650;
+    let animationFrame = 0;
+
+    const update = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setDisplayValue(Math.round(from + (value - from) * eased));
+
+      if (progress < 1) animationFrame = requestAnimationFrame(update);
+    };
+
+    animationFrame = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(animationFrame);
+  }, [value]);
+
+  return <span className={className}>{integerFormatter.format(displayValue)}</span>;
+}
+
+function resultBadge(score: number, difference: number) {
+  const scoreBadge = RESULT_BADGE_THRESHOLDS.find(
+    ({ minimumScore }) => score >= minimumScore,
+  );
+  if (scoreBadge) return scoreBadge;
+
+  if (difference > 0) {
+    return {
+      label: "WAY OVER",
+      className: "border-amber-300/35 bg-amber-300/12 text-amber-200",
+    };
+  }
+  if (difference < 0) {
+    return {
+      label: "WAY UNDER",
+      className: "border-orange-300/35 bg-orange-300/12 text-orange-200",
+    };
+  }
+
+  return {
+    label: "OUCH",
+    className: "border-red-300/35 bg-red-300/12 text-red-200",
+  };
+}
+
+function ScoreProgress({ scores }: { scores: number[] }) {
+  return (
+    <ol className="grid grid-cols-5 gap-2" aria-label="Round scores">
+      {Array.from({ length: ROUND_COUNT }, (_, index) => {
+        const score = scores[index];
+
+        return (
+          <li key={index} className="min-w-0 text-center">
+            <span className="text-[0.6rem] font-bold tracking-wider text-muted-foreground">
+              R{index + 1}
+            </span>
+            <div
+              className={cn(
+                "mt-1 rounded-md border px-1 py-2 font-mono text-xs font-black",
+                score === undefined
+                  ? "border-border bg-background/35 text-muted-foreground"
+                  : score === MAX_ROUND_SCORE
+                    ? "border-primary/35 bg-primary/10 text-primary"
+                    : "border-border bg-background/65 text-foreground",
+              )}
+            >
+              {score === undefined ? "—" : integerFormatter.format(score)}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+export function WorldMap({
+  initialDifficulty,
+}: {
+  initialDifficulty?: GameDifficulty;
+}) {
   const router = useRouter();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<GoogleMap>(null);
@@ -40,18 +168,25 @@ export function WorldMap() {
   const [runtimePlayer, setRuntimePlayer] =
     useState<RuntimePlayerSummary | null>(null);
   const [runtimeGameId, setRuntimeGameId] = useState<string | null>(null);
-  const [difficulty, setDifficulty] = useState<GameDifficulty>("EASY");
+  const [difficulty, setDifficulty] = useState<GameDifficulty>(
+    initialDifficulty ?? "EASY",
+  );
   const [target, setTarget] = useState<number | null>(null);
   const [populationResponse, setPopulationResponse] =
     useState<PopulationResponse | null>(null);
   const [currentRound, setCurrentRound] = useState(0);
   const [roundScores, setRoundScores] = useState<number[]>([]);
   const [totalScore, setTotalScore] = useState(0);
+  const [completedDrawingCount, setCompletedDrawingCount] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isTargetLoading, setIsTargetLoading] = useState(false);
   const roundVersionRef = useRef(0);
   const targetRequestRef = useRef(0);
   const targetRequestPendingRef = useRef(false);
+  const autoStartAttemptedRef = useRef(false);
+  const [isAutoStarting, setIsAutoStarting] = useState(
+    initialDifficulty !== undefined,
+  );
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
   useEffect(() => {
@@ -94,7 +229,7 @@ export function WorldMap() {
           container,
           map,
           maps: loadedMaps,
-          onCompletedDrawingCountChange: () => undefined,
+          onCompletedDrawingCountChange: setCompletedDrawingCount,
           onModeChange: () => undefined,
         });
 
@@ -146,9 +281,11 @@ export function WorldMap() {
     }
   };
 
-  const startGame = async () => {
+  const startGame = async (selectedDifficulty = difficulty) => {
     try {
-      const nextRound = await loadRound(() => requestGameStart(difficulty));
+      const nextRound = await loadRound(() =>
+        requestGameStart(selectedDifficulty),
+      );
       if (nextRound === null) return;
 
       roundVersionRef.current += 1;
@@ -165,6 +302,13 @@ export function WorldMap() {
     }
   };
 
+  useEffect(() => {
+    if (!initialDifficulty || autoStartAttemptedRef.current) return;
+
+    autoStartAttemptedRef.current = true;
+    void startGame(initialDifficulty).finally(() => setIsAutoStarting(false));
+  }, [initialDifficulty]);
+
   const resetGame = () => {
     roundVersionRef.current += 1;
     targetRequestRef.current += 1;
@@ -175,6 +319,7 @@ export function WorldMap() {
     setPopulationResponse(null);
     setRoundScores([]);
     setTotalScore(0);
+    setCompletedDrawingCount(0);
     setCurrentRound(0);
     setTarget(null);
     setRuntimePlayer(null);
@@ -212,12 +357,24 @@ export function WorldMap() {
 
       roundVersionRef.current += 1;
       drawRef.current?.reset();
+      setCompletedDrawingCount(0);
       setIsSubmitting(false);
       setPopulationResponse(null);
       setTarget(nextRound.target);
       setCurrentRound(nextRound.roundNumber);
     } catch (error) {
       console.error("Game start failed:", error);
+    }
+  };
+
+  const playAgain = async () => {
+    setIsAutoStarting(true);
+    resetGame();
+
+    try {
+      await startGame(difficulty);
+    } finally {
+      setIsAutoStarting(false);
     }
   };
 
@@ -282,132 +439,345 @@ export function WorldMap() {
   const accumulatedScore = totalScore;
   const currentRoundScore =
     populationResponse !== null ? (roundScores[currentRound - 1] ?? null) : null;
+  const calculatedPopulation =
+    populationResponse === null
+      ? null
+      : Math.round(populationResponse.totalPopulation);
+  const difference =
+    calculatedPopulation === null || target === null
+      ? null
+      : calculatedPopulation - target;
+  const percentageError =
+    difference === null || target === null
+      ? null
+      : (Math.abs(difference) / target) * 100;
+  const badge =
+    currentRoundScore === null || difference === null
+      ? null
+      : resultBadge(currentRoundScore, difference);
+  const isFinalResult =
+    populationResponse !== null &&
+    currentRoundScore !== null &&
+    currentRound === ROUND_COUNT;
+  const bestRound = roundScores.length > 0 ? Math.max(...roundScores) : 0;
+  const averageRound =
+    roundScores.length > 0
+      ? Math.round(
+          roundScores.reduce((total, score) => total + score, 0) /
+            roundScores.length,
+        )
+      : 0;
+  const perfectRounds = roundScores.filter(
+    (score) => score === MAX_ROUND_SCORE,
+  ).length;
+  const zeroRounds = roundScores.filter((score) => score === 0).length;
 
   return (
     <>
       <main ref={mapContainer} className="h-screen w-screen" />
-      {mapError !== null && (
-        <div className="fixed inset-x-4 top-4 z-20 rounded bg-red-950 px-4 py-3 text-center text-sm text-red-100">
-          {mapError}
-        </div>
-      )}
-      {process.env.NODE_ENV === "development" && (
-        <aside className="pointer-events-none fixed right-3 bottom-3 z-10 rounded bg-black/80 px-3 py-2 font-mono text-xs text-white shadow">
-          <div>Google rendering: {renderingType}</div>
-          <div>Map creations: {mapCreationCount}</div>
-        </aside>
-      )}
-      <Button
-        type="button"
-        onClick={submitPolygons}
-        disabled={!isDrawReady || populationResponse !== null || isSubmitting}
-        variant="outline"
-        className="fixed top-4 left-4 z-[1] h-auto cursor-pointer rounded-[4px] border-[#777] bg-white px-3 py-2 text-[13.3333px] font-normal text-black shadow-none hover:bg-white disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
-      >
-        Submit
-      </Button>
-      {target !== null && (
-        <>
-          <div className="fixed top-4 left-1/2 z-[1] -translate-x-1/2 rounded-[8px] bg-black/[0.65] px-[18px] py-2 text-center text-white">
-            <div className="mb-1.5 text-[11px] font-bold tracking-[0.18em]">
-              ROUND {currentRound} / {ROUND_COUNT}
-            </div>
-            <div className="text-[11px] font-bold tracking-[0.18em]">
-              TARGET
-            </div>
-            <div className="text-2xl font-extrabold">
-              {target.toLocaleString("en-US")}
-            </div>
-            <div className="mt-1.5 text-xs">
-              SCORE {accumulatedScore.toLocaleString("en-US")}
-            </div>
+      <div className="dark contents">
+        {mapError !== null && (
+          <div className="fixed inset-x-3 top-3 z-50 rounded-lg border border-red-300/20 bg-red-950/95 px-4 py-3 text-center text-sm text-red-100 shadow-xl">
+            {mapError}
           </div>
-          <Button
-            type="button"
-            onClick={abandonGame}
-            variant="outline"
-            className="fixed top-4 right-4 z-[1] h-auto cursor-pointer rounded-[4px] border-[#777] bg-white px-3 py-2 text-[13.3333px] font-normal text-black shadow-none hover:bg-white"
-          >
-            ABANDON
-          </Button>
-        </>
-      )}
-      {populationResponse !== null && currentRoundScore !== null && (
-        <div className="fixed bottom-6 left-1/2 z-[1] min-w-[220px] -translate-x-1/2 rounded-[8px] bg-black/[0.72] px-6 py-4 text-center text-white">
-          <div className="text-sm">Hai selezionato</div>
-          <div className="text-[28px] font-extrabold">
-            {Math.round(populationResponse.totalPopulation).toLocaleString("en-US")}
-          </div>
-          <div className="mt-3 text-sm">Round points</div>
-          <div className="text-[28px] font-extrabold">
-            {currentRoundScore.toLocaleString("en-US")}
-          </div>
-          {currentRound < ROUND_COUNT ? (
-            <Button
-              type="button"
-              onClick={nextRound}
-              disabled={isTargetLoading}
-              variant="outline"
-              className="mt-4 h-auto cursor-pointer rounded-[4px] border-white bg-white px-4 py-2 font-bold text-black shadow-none hover:bg-white disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
-            >
-              NEXT ROUND
-            </Button>
-          ) : (
+        )}
+        {process.env.NODE_ENV === "development" && (
+          <aside className="pointer-events-none fixed right-3 bottom-3 z-10 rounded-md bg-black/75 px-3 py-2 font-mono text-[0.65rem] text-white shadow">
+            <div>Google rendering: {renderingType}</div>
+            <div>Map creations: {mapCreationCount}</div>
+          </aside>
+        )}
+
+        {runtimePlayer !== null &&
+          target !== null &&
+          populationResponse === null && (
             <>
-              <div className="mt-3 text-sm">Final score</div>
-              <div className="text-[28px] font-extrabold">
-                {accumulatedScore.toLocaleString("en-US")} /{" "}
-                {MAX_GAME_SCORE.toLocaleString("en-US")}
+              <section className="fixed top-3 left-3 z-20 w-[calc(100vw-7.5rem)] max-w-[25rem] rounded-xl border border-white/10 bg-background/90 px-4 py-3 text-foreground shadow-xl backdrop-blur-md sm:left-1/2 sm:w-full sm:-translate-x-1/2">
+                <div className="flex items-center justify-between gap-3 text-[0.65rem] font-black tracking-[0.16em] uppercase">
+                  <span
+                    className={
+                      difficulty === "EASY" ? "text-primary" : "text-sky-300"
+                    }
+                  >
+                    {difficulty}
+                  </span>
+                  <span className="text-muted-foreground">
+                    Round {currentRound}/{ROUND_COUNT}
+                  </span>
+                </div>
+                <div className="mt-2 flex items-end justify-between gap-4">
+                  <div>
+                    <div className="flex items-center gap-1.5 text-[0.62rem] font-bold tracking-[0.16em] text-muted-foreground uppercase">
+                      <Target className="size-3" aria-hidden="true" />
+                      Target population
+                    </div>
+                    <div className="mt-0.5 font-mono text-2xl font-black tracking-tight sm:text-3xl">
+                      {integerFormatter.format(target)}
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[0.62rem] font-bold tracking-[0.14em] text-muted-foreground uppercase">
+                      Total
+                    </div>
+                    <AnimatedNumber
+                      value={accumulatedScore}
+                      className="font-mono text-base font-black"
+                    />
+                  </div>
+                </div>
+              </section>
+
+              <Button
+                type="button"
+                onClick={abandonGame}
+                variant="ghost"
+                size="sm"
+                className="fixed top-3 right-3 z-20 border border-white/10 bg-background/80 text-xs text-muted-foreground shadow-lg backdrop-blur-md hover:bg-background hover:text-foreground"
+              >
+                Abandon
+              </Button>
+
+              <div className="fixed bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-white/10 bg-background/90 p-2 pl-3 text-foreground shadow-2xl backdrop-blur-md">
+                <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
+                  <Layers3 className="size-4" aria-hidden="true" />
+                  {completedDrawingCount === 1
+                    ? "1 area"
+                    : `${completedDrawingCount} areas`}
+                </div>
+                <Button
+                  type="button"
+                  onClick={submitPolygons}
+                  disabled={!isDrawReady || isSubmitting}
+                  className="h-10 px-5 font-black"
+                >
+                  {isSubmitting ? "Submitting…" : "Submit"}
+                  {!isSubmitting && <ChevronRight aria-hidden="true" />}
+                </Button>
+              </div>
+            </>
+          )}
+
+        {populationResponse !== null &&
+          currentRoundScore !== null &&
+          target !== null &&
+          calculatedPopulation !== null &&
+          difference !== null &&
+          percentageError !== null &&
+          badge !== null &&
+          !isFinalResult && (
+            <section className="animate-in fade-in slide-in-from-bottom-4 fixed inset-x-3 bottom-3 z-30 max-h-[calc(100dvh-1.5rem)] overflow-y-auto rounded-2xl border border-white/10 bg-background/95 p-5 text-foreground shadow-2xl backdrop-blur-md duration-300 sm:inset-x-auto sm:top-3 sm:right-3 sm:bottom-auto sm:w-[25rem] sm:p-6">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <p className="text-[0.65rem] font-black tracking-[0.17em] text-muted-foreground uppercase">
+                    {difficulty} · Round {currentRound}/{ROUND_COUNT}
+                  </p>
+                  <span
+                    className={cn(
+                      "mt-2 inline-flex rounded-full border px-2.5 py-1 text-[0.68rem] font-black tracking-[0.14em]",
+                      badge.className,
+                    )}
+                  >
+                    {badge.label}
+                  </span>
+                </div>
+                <Trophy className="size-7 text-primary" aria-hidden="true" />
+              </div>
+
+              <dl className="mt-6 grid grid-cols-2 gap-x-5 gap-y-4">
+                <div>
+                  <dt className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Target
+                  </dt>
+                  <dd className="mt-1 font-mono text-lg font-black">
+                    {integerFormatter.format(target)}
+                  </dd>
+                </div>
+                <div className="text-right">
+                  <dt className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Your population
+                  </dt>
+                  <dd className="mt-1 font-mono text-lg font-black">
+                    {integerFormatter.format(calculatedPopulation)}
+                  </dd>
+                </div>
+                <div className="col-span-2 flex items-center justify-between border-t border-border pt-4 text-sm">
+                  <dt className="text-muted-foreground">
+                    {difference === 0
+                      ? "Exactly on target"
+                      : difference > 0
+                        ? "Over target"
+                        : "Under target"}
+                  </dt>
+                  <dd className="font-mono font-black">
+                    {difference === 0 ? "—" : integerFormatter.format(Math.abs(difference))}
+                    <span className="ml-2 text-muted-foreground">
+                      ({percentageError < 10
+                        ? percentageError.toFixed(1)
+                        : Math.round(percentageError)}
+                      %)
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+
+              <div className="mt-5 grid grid-cols-2 gap-3 rounded-xl border border-border bg-card p-4">
+                <div>
+                  <p className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Round score
+                  </p>
+                  <AnimatedNumber
+                    value={currentRoundScore}
+                    className="mt-1 block font-mono text-3xl font-black text-primary"
+                  />
+                </div>
+                <div className="border-l border-border pl-4">
+                  <p className="text-[0.62rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Total score
+                  </p>
+                  <AnimatedNumber
+                    value={accumulatedScore}
+                    className="mt-1 block font-mono text-3xl font-black"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-5">
+                <ScoreProgress scores={roundScores} />
+              </div>
+
+              <Button
+                type="button"
+                onClick={nextRound}
+                disabled={isTargetLoading}
+                className="mt-6 h-11 w-full font-black"
+              >
+                {isTargetLoading ? "Loading…" : "Next round"}
+                {!isTargetLoading && <ChevronRight aria-hidden="true" />}
+              </Button>
+              <Button
+                type="button"
+                onClick={abandonGame}
+                variant="ghost"
+                size="sm"
+                className="mt-2 w-full text-muted-foreground"
+              >
+                Abandon game
+              </Button>
+            </section>
+          )}
+
+        {isFinalResult && (
+          <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/45 p-3 text-foreground backdrop-blur-[2px] duration-300">
+            <section className="animate-in zoom-in-95 my-auto w-full max-w-xl rounded-2xl border border-white/10 bg-background/96 p-5 shadow-2xl duration-300 sm:p-7">
+              <div className="text-center">
+                <p className="text-xs font-black tracking-[0.2em] text-primary uppercase">
+                  {difficulty} · Run complete
+                </p>
+                <h1 className="mt-3 text-3xl font-black tracking-tight">
+                  Final score
+                </h1>
+                <div className="mt-2 font-mono text-5xl font-black tracking-tight sm:text-6xl">
+                  <AnimatedNumber value={accumulatedScore} />
+                </div>
+                <p className="mt-1 font-mono text-sm text-muted-foreground">
+                  out of {integerFormatter.format(MAX_GAME_SCORE)}
+                </p>
+              </div>
+
+              <div className="mt-7">
+                <ScoreProgress scores={roundScores} />
+              </div>
+
+              <dl className="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-4">
+                {[
+                  ["Best round", integerFormatter.format(bestRound)],
+                  ["Average", integerFormatter.format(averageRound)],
+                  ["Perfect", String(perfectRounds)],
+                  ["Zero", String(zeroRounds)],
+                ].map(([label, value]) => (
+                  <div key={label} className="bg-card px-3 py-4 text-center">
+                    <dt className="text-[0.6rem] font-bold tracking-wider text-muted-foreground uppercase">
+                      {label}
+                    </dt>
+                    <dd className="mt-1 font-mono text-lg font-black">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+
+              <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                <Button
+                  type="button"
+                  onClick={playAgain}
+                  disabled={isTargetLoading}
+                  className="h-11 font-black"
+                >
+                  <RotateCcw aria-hidden="true" />
+                  Play again
+                </Button>
+                <Button asChild variant="outline" className="h-11 font-bold">
+                  <Link href="/">
+                    <ArrowLeft aria-hidden="true" />
+                    Back home
+                  </Link>
+                </Button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {runtimePlayer === null && isAutoStarting && (
+          <div className="fixed inset-0 z-40 grid place-items-center bg-black/45">
+            <div className="rounded-lg border border-white/10 bg-background/90 px-5 py-3 text-sm font-bold text-foreground shadow-xl backdrop-blur-md">
+              Starting {difficulty === "EASY" ? "Easy" : "Real"}…
+            </div>
+          </div>
+        )}
+        {runtimePlayer === null && !isAutoStarting && (
+          <div className="fixed inset-0 z-40 grid place-items-center bg-black/50 p-4 backdrop-blur-[2px]">
+            <section className="w-full max-w-sm rounded-2xl border border-white/10 bg-background/95 p-6 text-center text-foreground shadow-2xl">
+              <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
+                Single Player
+              </p>
+              <h1 className="mt-2 text-3xl font-black">Choose difficulty</h1>
+              <div
+                role="group"
+                aria-label="Game difficulty"
+                className="mt-6 grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-card"
+              >
+                {(["EASY", "REAL"] as const).map((option) => (
+                  <Button
+                    key={option}
+                    type="button"
+                    onClick={() => setDifficulty(option)}
+                    aria-pressed={difficulty === option}
+                    variant="ghost"
+                    className={cn(
+                      "h-11 rounded-none font-black",
+                      difficulty === option
+                        ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {option}
+                  </Button>
+                ))}
               </div>
               <Button
                 type="button"
-                onClick={resetGame}
-                variant="outline"
-                className="mt-4 h-auto cursor-pointer rounded-[4px] border-white bg-white px-4 py-2 font-bold text-black shadow-none hover:bg-white"
+                onClick={() => startGame()}
+                disabled={isTargetLoading}
+                className="mt-4 h-12 w-full text-base font-black"
               >
-                END GAME
+                {isTargetLoading ? "Starting…" : "Play"}
+                {!isTargetLoading && <ChevronRight aria-hidden="true" />}
               </Button>
-            </>
-          )}
-        </div>
-      )}
-      {runtimePlayer === null && (
-        <div className="fixed inset-0 z-10 grid place-items-center bg-black/50">
-          <div className="text-center">
-            <div
-              role="group"
-              aria-label="Game difficulty"
-              className="mb-4 flex justify-center overflow-hidden rounded-md border border-white bg-white"
-            >
-              {(["EASY", "REAL"] as const).map((option) => (
-                <Button
-                  key={option}
-                  type="button"
-                  onClick={() => setDifficulty(option)}
-                  aria-pressed={difficulty === option}
-                  variant="ghost"
-                  className={cn(
-                    "h-auto rounded-none px-5 py-2 font-bold",
-                    difficulty === option
-                      ? "bg-black text-white hover:bg-black hover:text-white"
-                      : "bg-white text-black hover:bg-white hover:text-black",
-                  )}
-                >
-                  {option}
-                </Button>
-              ))}
-            </div>
-            <Button
-              type="button"
-              onClick={startGame}
-              disabled={isTargetLoading}
-              className="h-auto cursor-pointer rounded-[10px] border-2 border-white bg-[linear-gradient(180deg,#38bdf8,#0369a1)] px-12 py-[18px] text-[28px] font-extrabold tracking-[0.18em] text-white [text-shadow:0_2px_4px_rgba(0,0,0,0.35)] shadow-[0_8px_24px_rgba(0,0,0,0.45)] hover:bg-[linear-gradient(180deg,#38bdf8,#0369a1)] disabled:pointer-events-auto disabled:cursor-default disabled:opacity-100"
-            >
-              PLAY
-            </Button>
+              <Button asChild variant="ghost" size="sm" className="mt-2">
+                <Link href="/">Back home</Link>
+              </Button>
+            </section>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </>
   );
 }
