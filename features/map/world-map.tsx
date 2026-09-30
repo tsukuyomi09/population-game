@@ -6,9 +6,15 @@ import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   ChevronRight,
+  CircleHelp,
   Layers3,
+  Map as MapIcon,
+  Move,
+  Pencil,
   RotateCcw,
   Target,
+  Trash2,
+  X,
 } from "lucide-react";
 import {
   GoogleDrawingMapAdapter,
@@ -307,6 +313,8 @@ export function WorldMap({
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<GoogleMap>(null);
   const drawRef = useRef<DrawController>(null);
+  const controlsDialogRef = useRef<HTMLDialogElement>(null);
+  const leaveDialogRef = useRef<HTMLDialogElement>(null);
   const [isDrawReady, setIsDrawReady] = useState(false);
   const [mapError, setMapError] = useState<string | null>(null);
   const [runtimePlayer, setRuntimePlayer] =
@@ -607,28 +615,186 @@ export function WorldMap({
             {mapError}
           </div>
         )}
+
+        <dialog
+          ref={controlsDialogRef}
+          aria-labelledby="controls-dialog-title"
+          className="m-auto max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-lg overflow-y-auto rounded-2xl border border-cyan-300/15 bg-slate-950 p-0 text-slate-50 shadow-2xl backdrop:bg-black/70"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) event.currentTarget.close();
+          }}
+        >
+          <div className="p-5 sm:p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="text-[0.62rem] font-black tracking-[0.16em] text-cyan-300 uppercase">
+                  Map &amp; shapes
+                </p>
+                <h2
+                  id="controls-dialog-title"
+                  className="mt-1 text-2xl font-black"
+                >
+                  Drawing controls
+                </h2>
+              </div>
+              <form method="dialog">
+                <Button
+                  type="submit"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Close"
+                >
+                  <X aria-hidden="true" />
+                </Button>
+              </form>
+            </div>
+
+            <ul className="mt-5 grid gap-2 text-sm">
+              <li className="flex gap-3 rounded-lg bg-slate-900/80 p-3">
+                <Pencil
+                  className="mt-0.5 size-4 shrink-0 text-cyan-300"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-bold">Draw and finish</p>
+                  <p className="mt-0.5 leading-5 text-slate-300">
+                    Hold <kbd className="font-mono text-cyan-200">Space</kbd> and
+                    drag. Loop back to the starting point to close the shape.
+                  </p>
+                </div>
+              </li>
+              <li className="flex gap-3 rounded-lg bg-slate-900/80 p-3">
+                <Pencil
+                  className="mt-0.5 size-4 shrink-0 text-cyan-300"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-bold">Continue or cancel</p>
+                  <p className="mt-0.5 leading-5 text-slate-300">
+                    Release the mouse to pause, then resume from the endpoint while
+                    holding <kbd className="font-mono text-cyan-200">Space</kbd>.
+                    Press <kbd className="font-mono text-cyan-200">Esc</kbd> to clear
+                    the unfinished shape.
+                  </p>
+                </div>
+              </li>
+              <li className="flex gap-3 rounded-lg bg-slate-900/80 p-3">
+                <Move
+                  className="mt-0.5 size-4 shrink-0 text-cyan-300"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-bold">Move or reshape</p>
+                  <p className="mt-0.5 leading-5 text-slate-300">
+                    Hold <kbd className="font-mono text-cyan-200">Space</kbd> and
+                    drag inside a finished shape to move it. Without Space, drag its
+                    highlighted edge to reshape it.
+                  </p>
+                </div>
+              </li>
+              <li className="flex gap-3 rounded-lg bg-slate-900/80 p-3">
+                <Trash2
+                  className="mt-0.5 size-4 shrink-0 text-rose-300"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-bold">Delete a shape</p>
+                  <p className="mt-0.5 leading-5 text-slate-300">
+                    Right-click a finished shape, then choose Delete.
+                  </p>
+                </div>
+              </li>
+              <li className="flex gap-3 rounded-lg bg-slate-900/80 p-3">
+                <MapIcon
+                  className="mt-0.5 size-4 shrink-0 text-cyan-300"
+                  aria-hidden="true"
+                />
+                <div>
+                  <p className="font-bold">Pan and zoom</p>
+                  <p className="mt-0.5 leading-5 text-slate-300">
+                    Without Space, drag the map to pan; scroll or pinch to zoom.
+                  </p>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </dialog>
+
+        <dialog
+          ref={leaveDialogRef}
+          aria-labelledby="leave-dialog-title"
+          className="m-auto w-[calc(100%-2rem)] max-w-sm rounded-2xl border border-rose-400/20 bg-slate-950 p-0 text-slate-50 shadow-2xl backdrop:bg-black/70"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) event.currentTarget.close();
+          }}
+        >
+          <div className="p-5 sm:p-6">
+            <div className="flex items-start justify-between gap-4">
+              <h2 id="leave-dialog-title" className="text-2xl font-black">
+                Leave game?
+              </h2>
+              <form method="dialog">
+                <Button
+                  type="submit"
+                  variant="ghost"
+                  size="icon"
+                  aria-label="Close"
+                >
+                  <X aria-hidden="true" />
+                </Button>
+              </form>
+            </div>
+            <p className="mt-3 leading-6 text-slate-300">
+              Your current game will end and won’t count as a completed run.
+            </p>
+            <Button
+              type="button"
+              onClick={() => {
+                leaveDialogRef.current?.close();
+                void abandonGame();
+              }}
+              variant="ghost"
+              className="mt-6 w-full border border-rose-400/40 bg-slate-900 text-rose-200 hover:bg-rose-950/70 hover:text-rose-100"
+            >
+              Leave
+            </Button>
+          </div>
+        </dialog>
+
         {runtimePlayer !== null &&
           target !== null &&
           populationResponse === null && (
             <>
-              <div className="fixed top-3 left-3 z-20 flex items-center gap-2 rounded-full border border-white/10 bg-background/90 px-3 py-2 text-[0.65rem] font-black tracking-[0.14em] text-foreground uppercase shadow-lg backdrop-blur-md">
-                <span
-                  className={
-                    difficulty === "EASY" ? "text-primary" : "text-sky-300"
-                  }
-                >
-                  {difficulty}
-                </span>
-                <span className="size-1 rounded-full bg-white/25" />
-                <span className="text-muted-foreground">
-                  R{currentRound}/{ROUND_COUNT}
-                </span>
+              <div className="fixed top-3 left-3 z-20 flex items-center gap-3 rounded-lg border border-cyan-300/20 bg-slate-950/90 px-3 py-1.5 text-slate-50 shadow-md backdrop-blur-[2px]">
+                <div>
+                  <div
+                    className={cn(
+                      "text-[0.48rem] font-black tracking-[0.14em] uppercase",
+                      difficulty === "EASY" ? "text-cyan-300" : "text-blue-300",
+                    )}
+                  >
+                    {difficulty}
+                  </div>
+                  <div className="text-[0.65rem] leading-tight font-black tracking-[0.08em] text-white/85 uppercase">
+                    Round {currentRound}/{ROUND_COUNT}
+                  </div>
+                </div>
+                <span className="h-7 w-px bg-cyan-200/20" aria-hidden="true" />
+                <div>
+                  <div className="text-[0.48rem] font-black tracking-[0.14em] text-cyan-300 uppercase">
+                    Total
+                  </div>
+                  <AnimatedNumber
+                    value={accumulatedScore}
+                    className="block font-mono text-sm leading-tight font-black"
+                  />
+                </div>
               </div>
 
               <section className="fixed top-14 left-1/2 z-20 -translate-x-1/2 rounded-xl border border-primary/20 bg-background/92 px-4 py-2 text-center text-foreground shadow-xl backdrop-blur-md md:top-3">
                 <div className="flex items-center justify-center gap-1.5 text-[0.56rem] font-black tracking-[0.16em] text-primary uppercase">
                   <Target className="size-3" aria-hidden="true" />
-                  Target
+                  Target population
                 </div>
                 <div className="font-mono text-2xl leading-none font-black tracking-tight">
                   {integerFormatter.format(target)}
@@ -636,23 +802,25 @@ export function WorldMap({
               </section>
 
               <div className="fixed top-3 right-3 z-20 flex items-center gap-2">
-                <div className="rounded-full border border-sky-300/20 bg-background/90 px-3 py-1.5 text-right text-foreground shadow-lg backdrop-blur-md">
-                  <div className="text-[0.5rem] font-black tracking-[0.14em] text-sky-300 uppercase">
-                    Total
-                  </div>
-                  <AnimatedNumber
-                    value={accumulatedScore}
-                    className="block font-mono text-sm leading-none font-black"
-                  />
-                </div>
                 <Button
                   type="button"
-                  onClick={abandonGame}
+                  onClick={() => controlsDialogRef.current?.showModal()}
                   variant="ghost"
                   size="sm"
-                  className="border border-white/10 bg-background/75 text-xs text-muted-foreground shadow-lg backdrop-blur-md hover:bg-background hover:text-foreground"
+                  aria-label="Drawing controls"
+                  className="border border-cyan-300/20 bg-slate-950/90 text-xs text-cyan-100 shadow-lg backdrop-blur-md hover:bg-slate-900 hover:text-white"
                 >
-                  Abandon
+                  <CircleHelp aria-hidden="true" />
+                  <span className="hidden sm:inline">Controls</span>
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => leaveDialogRef.current?.showModal()}
+                  variant="ghost"
+                  size="sm"
+                  className="border border-rose-400/35 bg-slate-950/90 text-xs text-rose-200 shadow-lg backdrop-blur-md hover:border-rose-300/60 hover:bg-rose-950/70 hover:text-rose-100"
+                >
+                  Leave
                 </Button>
               </div>
 
