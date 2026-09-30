@@ -6,6 +6,7 @@ RUN npm ci
 
 FROM dependencies AS builder
 
+ARG NEXT_PUBLIC_GOOGLE_MAPS_API_KEY
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY . .
 RUN mkdir -p public && npm run build
