@@ -3,6 +3,10 @@
 import { useRef } from "react";
 import Link from "next/link";
 import { ArrowRight, Crosshair, Sparkles, X } from "lucide-react";
+import {
+  DesktopRequiredMessage,
+  isDesktopPlayViewport,
+} from "@/components/desktop-play-gate";
 import { Button } from "@/components/ui/button";
 
 const modes = [
@@ -28,6 +32,7 @@ const modes = [
 
 export function PlayModeDialog() {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const desktopRequiredDialogRef = useRef<HTMLDialogElement>(null);
 
   return (
     <>
@@ -35,11 +40,32 @@ export function PlayModeDialog() {
         type="button"
         size="lg"
         className="h-12 w-full px-8 text-base font-black sm:w-40"
-        onClick={() => dialogRef.current?.showModal()}
+        onClick={() => {
+          if (isDesktopPlayViewport()) dialogRef.current?.showModal();
+          else desktopRequiredDialogRef.current?.showModal();
+        }}
       >
         Play
         <ArrowRight aria-hidden="true" />
       </Button>
+
+      <dialog
+        ref={desktopRequiredDialogRef}
+        aria-labelledby="desktop-required-dialog-title"
+        className="m-auto w-[calc(100%-2rem)] max-w-sm rounded-2xl border border-border bg-card p-0 text-foreground shadow-2xl backdrop:bg-black/75 backdrop:backdrop-blur-sm"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) event.currentTarget.close();
+        }}
+      >
+        <div className="relative p-5 pr-14 sm:p-6 sm:pr-16">
+          <DesktopRequiredMessage titleId="desktop-required-dialog-title" />
+          <form method="dialog" className="absolute top-4 right-4">
+            <Button type="submit" variant="ghost" size="icon" aria-label="Close">
+              <X aria-hidden="true" />
+            </Button>
+          </form>
+        </div>
+      </dialog>
 
       <dialog
         ref={dialogRef}

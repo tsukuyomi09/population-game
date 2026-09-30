@@ -1,5 +1,6 @@
 import { WorldMap } from "../../features/map/world-map";
 import { isGameDifficulty } from "../../features/game/single-player";
+import { DesktopGameGate } from "../../components/desktop-play-gate";
 
 export default async function GamePage({
   searchParams,
@@ -9,8 +10,10 @@ export default async function GamePage({
   const { difficulty } = await searchParams;
 
   return (
-    <WorldMap
-      initialDifficulty={isGameDifficulty(difficulty) ? difficulty : undefined}
-    />
+    <DesktopGameGate>
+      <WorldMap
+        initialDifficulty={isGameDifficulty(difficulty) ? difficulty : undefined}
+      />
+    </DesktopGameGate>
   );
 }
