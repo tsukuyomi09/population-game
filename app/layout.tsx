@@ -6,6 +6,9 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "Worldrawing",
   description: "Estimate populations by drawing on the world map.",
+  other: {
+    "google-adsense-account": "ca-pub-1873587847736240",
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
