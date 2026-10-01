@@ -13,6 +13,9 @@
   "files": [
     "server/runtime-game.test.ts",
     "server/runtime-game.ts",
+    "server/runtime-submission.test.ts",
+    "server/runtime-submission.ts",
+    "../population/types.ts",
     "runtime-player.test.ts",
     "runtime-player.ts",
     "single-player.ts"

@@ -56,6 +56,14 @@ export type RuntimeResolutionOutcome = {
   gameFinalized: boolean;
 };
 
+export type RuntimeTimeoutSubmissionRequest = {
+  runtimeGameId: string;
+  runtimePlayerId: string;
+  roundNumber: number;
+  submissionType: "TIMEOUT";
+  requestedAt: Date;
+};
+
 type PlayerRoundState = {
   player: RuntimePlayer;
   state: RuntimePlayerRoundLifecycle;
@@ -150,6 +158,30 @@ export class RuntimeGame {
     const round = this.createRound(1, startedAt);
     this.lifecycle = "ROUND_ACTIVE";
     return this.roundSnapshot(round);
+  }
+
+  timeoutSubmissionRequest(
+    player: RuntimePlayer,
+    roundNumber: number,
+    requestedAt: Date,
+  ): RuntimeTimeoutSubmissionRequest | null {
+    const { playerState } = this.playerRound(player, roundNumber);
+    if (playerState.resolution) return null;
+    const { round } = this.activePlayerRound(player, roundNumber);
+    if (!validDate(requestedAt)) {
+      throw new RuntimeGameTransitionError("Timeout request time is invalid.");
+    }
+    if (requestedAt < round.endsAt) {
+      throw new RuntimeGameTransitionError("The round deadline has not passed.");
+    }
+
+    return {
+      runtimeGameId: this.options.runtimeGameId,
+      runtimePlayerId: player.runtimePlayerId,
+      roundNumber,
+      submissionType: "TIMEOUT",
+      requestedAt: new Date(requestedAt),
+    };
   }
 
   resolvePlayer(input: ResolvePlayerInput): RuntimeResolutionOutcome {
@@ -274,6 +306,34 @@ export class RuntimeGame {
     };
     this.rounds.push(round);
     return round;
+  }
+
+  private playerRound(player: RuntimePlayer, roundNumber: number) {
+    const round = this.rounds.find(
+      (candidate) => candidate.roundNumber === roundNumber,
+    );
+    const playerState = round?.players.find((candidate) =>
+      samePlayer(candidate.player, player),
+    );
+    if (!round || !playerState) {
+      throw new RuntimeGameTransitionError("Round or player not found.");
+    }
+
+    return { round, playerState };
+  }
+
+  private activePlayerRound(player: RuntimePlayer, roundNumber: number) {
+    const { round, playerState } = this.playerRound(player, roundNumber);
+    if (
+      this.lifecycle !== "ROUND_ACTIVE" ||
+      round !== this.rounds[this.rounds.length - 1] ||
+      round.state !== "ACTIVE" ||
+      playerState.state !== "PENDING"
+    ) {
+      throw new RuntimeGameTransitionError("The round is not active.");
+    }
+
+    return { round, playerState };
   }
 
   private roundSnapshot(round: RuntimeRoundState): RuntimeRoundSnapshot {
