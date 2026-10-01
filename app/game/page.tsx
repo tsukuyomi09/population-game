@@ -5,14 +5,18 @@ import { DesktopGameGate } from "../../components/desktop-play-gate";
 export default async function GamePage({
   searchParams,
 }: {
-  searchParams: Promise<{ difficulty?: string | string[] }>;
+  searchParams: Promise<{
+    difficulty?: string | string[];
+    duelId?: string | string[];
+  }>;
 }) {
-  const { difficulty } = await searchParams;
+  const { difficulty, duelId } = await searchParams;
 
   return (
     <DesktopGameGate>
       <WorldMap
         initialDifficulty={isGameDifficulty(difficulty) ? difficulty : undefined}
+        duelId={typeof duelId === "string" && duelId.length > 0 ? duelId : undefined}
       />
     </DesktopGameGate>
   );

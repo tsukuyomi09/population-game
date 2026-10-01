@@ -11,6 +11,8 @@
     "outDir": "../../artifacts/game/identity-tests"
   },
   "files": [
+    "server/direct-duel-service.test.ts",
+    "server/direct-duel-service.ts",
     "server/runtime-game.test.ts",
     "server/runtime-game.ts",
     "server/runtime-submission.test.ts",

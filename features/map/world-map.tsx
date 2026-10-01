@@ -1,17 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
   ChevronRight,
   CircleHelp,
+  Clock3,
   Layers3,
   Map as MapIcon,
   Move,
   Pencil,
   RotateCcw,
+  Swords,
   Target,
   Trash2,
   X,
@@ -25,6 +27,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
+import { requestDirectDuelSubmission } from "../game/direct-duel";
 import {
   type GameDifficulty,
   MAX_GAME_SCORE,
@@ -36,6 +39,13 @@ import {
   ROUND_COUNT,
 } from "../game/game";
 import type { RuntimePlayerSummary } from "../game/runtime-player";
+import type {
+  DirectDuelEvent,
+  DirectDuelOutcome,
+  DirectDuelRound,
+} from "../game/server/direct-duel-service";
+import type { RuntimeRoundResolution } from "../game/server/runtime-game";
+import type { SubmissionType } from "../game/single-player";
 import type { PopulationRequest, PopulationResponse } from "../population/types";
 import { createGoogleWorldMap, loadGoogleMaps } from "./google-map";
 
@@ -304,11 +314,35 @@ function ScoreProgress({
   );
 }
 
+function currentPopulationShapes(draw: DrawController | null) {
+  const drawings = draw?.getDrawings();
+  const featureCollection = drawings
+    ? createPolygonFeatureCollection(drawings)
+    : { type: "FeatureCollection" as const, features: [] };
+
+  return featureCollection.features.map((feature) => {
+    if (feature.id === undefined) {
+      throw new Error("A completed polygon is missing an id.");
+    }
+
+    return { id: feature.id, geometry: feature.geometry };
+  });
+}
+
+type DuelRoundResult = {
+  roundNumber: number;
+  own: RuntimeRoundResolution;
+  opponent: RuntimeRoundResolution;
+};
+
 export function WorldMap({
   initialDifficulty,
+  duelId,
 }: {
   initialDifficulty?: GameDifficulty;
+  duelId?: string;
 }) {
+  const isDuel = duelId !== undefined;
   const router = useRouter();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<GoogleMap>(null);
@@ -332,12 +366,29 @@ export function WorldMap({
   const [completedDrawingCount, setCompletedDrawingCount] = useState(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isTargetLoading, setIsTargetLoading] = useState(false);
+  const [duelConnection, setDuelConnection] = useState<
+    "connecting" | "connected" | "disconnected"
+  >(isDuel ? "connecting" : "disconnected");
+  const [duelPlayers, setDuelPlayers] = useState<RuntimePlayerSummary[]>([]);
+  const [duelRound, setDuelRound] = useState<DirectDuelRound | null>(null);
+  const [duelRoundResult, setDuelRoundResult] =
+    useState<DuelRoundResult | null>(null);
+  const [duelOutcome, setDuelOutcome] = useState<DirectDuelOutcome | null>(null);
+  const [opponentTotalScore, setOpponentTotalScore] = useState(0);
+  const [duelSubmitted, setDuelSubmitted] = useState(false);
+  const [opponentSubmitted, setOpponentSubmitted] = useState(false);
+  const [duelError, setDuelError] = useState<string | null>(null);
+  const [duelNow, setDuelNow] = useState(() => Date.now());
   const roundVersionRef = useRef(0);
   const targetRequestRef = useRef(0);
   const targetRequestPendingRef = useRef(false);
   const autoStartAttemptedRef = useRef(false);
+  const runtimePlayerRef = useRef<RuntimePlayerSummary | null>(null);
+  const duelRoundNumberRef = useRef<number | null>(null);
+  const duelSubmittedRoundRef = useRef<number | null>(null);
+  const duelPendingSubmissionsRef = useRef(0);
   const [isAutoStarting, setIsAutoStarting] = useState(
-    initialDifficulty !== undefined,
+    !isDuel && initialDifficulty !== undefined,
   );
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
 
@@ -399,6 +450,18 @@ export function WorldMap({
     };
   }, [apiKey]);
 
+  useEffect(() => {
+    runtimePlayerRef.current = runtimePlayer;
+  }, [runtimePlayer]);
+
+  useEffect(() => {
+    if (!duelRound || duelOutcome) return;
+
+    setDuelNow(Date.now());
+    const timer = window.setInterval(() => setDuelNow(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [duelOutcome, duelRound]);
+
   const loadRound = async (
     requestRound: () => ReturnType<typeof requestGameStart>,
   ) => {
@@ -441,11 +504,11 @@ export function WorldMap({
   };
 
   useEffect(() => {
-    if (!initialDifficulty || autoStartAttemptedRef.current) return;
+    if (isDuel || !initialDifficulty || autoStartAttemptedRef.current) return;
 
     autoStartAttemptedRef.current = true;
     void startGame(initialDifficulty).finally(() => setIsAutoStarting(false));
-  }, [initialDifficulty]);
+  }, [initialDifficulty, isDuel]);
 
   const resetGame = () => {
     roundVersionRef.current += 1;
@@ -516,7 +579,156 @@ export function WorldMap({
     }
   };
 
+  const submitDirectDuel = useCallback(
+    async (submissionType: SubmissionType, roundNumber: number) => {
+      if (
+        !duelId ||
+        duelRoundNumberRef.current !== roundNumber ||
+        duelSubmittedRoundRef.current === roundNumber
+      ) {
+        return;
+      }
+
+      duelPendingSubmissionsRef.current += 1;
+      setIsSubmitting(true);
+      setDuelError(null);
+
+      try {
+        await requestDirectDuelSubmission(
+          duelId,
+          roundNumber,
+          submissionType,
+          currentPopulationShapes(drawRef.current),
+        );
+      } catch (error) {
+        setDuelError(
+          error instanceof Error ? error.message : "Duel submission failed.",
+        );
+      } finally {
+        duelPendingSubmissionsRef.current -= 1;
+        if (duelPendingSubmissionsRef.current === 0) setIsSubmitting(false);
+      }
+    },
+    [duelId],
+  );
+
+  useEffect(() => {
+    if (!duelId) return;
+
+    let lastSequence = 0;
+    setDuelConnection("connecting");
+    setRuntimeGameId(duelId);
+    const source = new EventSource(
+      `/api/duel/direct?duelId=${encodeURIComponent(duelId)}`,
+    );
+
+    source.onopen = () => {
+      setDuelConnection("connected");
+      setDuelError(null);
+    };
+    source.onerror = () => setDuelConnection("disconnected");
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as DirectDuelEvent;
+      if (event.sequence <= lastSequence) return;
+      lastSequence = event.sequence;
+
+      if (event.type === "connected" && event.player) {
+        runtimePlayerRef.current = event.player;
+        setRuntimePlayer(event.player);
+      }
+
+      if (event.type === "game_started" && event.players) {
+        setDuelPlayers(event.players);
+      }
+
+      if (event.type === "round_started" && event.round) {
+        const isNewRound =
+          duelRoundNumberRef.current !== event.round.roundNumber;
+        duelRoundNumberRef.current = event.round.roundNumber;
+        setDuelRound(event.round);
+        setTarget(event.round.target);
+        setCurrentRound(event.round.roundNumber);
+        setDuelNow(Date.now());
+
+        if (isNewRound) {
+          duelSubmittedRoundRef.current = null;
+          setDuelSubmitted(false);
+          setOpponentSubmitted(false);
+          roundVersionRef.current += 1;
+          drawRef.current?.reset();
+          setCompletedDrawingCount(0);
+        }
+      }
+
+      if (
+        event.type === "submission_accepted" &&
+        event.roundNumber !== undefined
+      ) {
+        duelSubmittedRoundRef.current = event.roundNumber;
+        setDuelSubmitted(true);
+        setDuelError(null);
+      }
+
+      if (event.type === "opponent_submitted") {
+        setOpponentSubmitted(true);
+      }
+
+      if (
+        event.type === "timeout_submission_requested" &&
+        event.roundNumber !== undefined
+      ) {
+        void submitDirectDuel("TIMEOUT", event.roundNumber);
+      }
+
+      if (
+        event.type === "round_resolved" &&
+        event.roundNumber !== undefined &&
+        event.results
+      ) {
+        const ownPlayerId = runtimePlayerRef.current?.runtimePlayerId;
+        const own = event.results.find(
+          (result) => result.runtimePlayerId === ownPlayerId,
+        );
+        const opponent = event.results.find(
+          (result) => result.runtimePlayerId !== ownPlayerId,
+        );
+
+        if (own && opponent) {
+          setRoundScores((scores) => {
+            const nextScores = [...scores];
+            nextScores[event.roundNumber! - 1] = own.score;
+            return nextScores;
+          });
+          setDuelRoundResult({
+            roundNumber: event.roundNumber,
+            own,
+            opponent,
+          });
+          if (event.totals) {
+            setTotalScore(event.totals[own.runtimePlayerId] ?? 0);
+            setOpponentTotalScore(event.totals[opponent.runtimePlayerId] ?? 0);
+          }
+        }
+      }
+
+      if (event.type === "game_completed" && event.outcome) {
+        setDuelOutcome(event.outcome);
+        setTotalScore(event.totalScore ?? 0);
+        setOpponentTotalScore(event.opponentTotalScore ?? 0);
+        setDuelRound(null);
+        setTarget(null);
+      }
+    };
+
+    return () => source.close();
+  }, [duelId, submitDirectDuel]);
+
   const submitPolygons = async () => {
+    if (isDuel) {
+      await submitDirectDuel("MANUAL", currentRound);
+      return;
+    }
+
     if (
       target === null ||
       runtimeGameId === null ||
@@ -527,27 +739,11 @@ export function WorldMap({
     }
 
     const roundVersion = roundVersionRef.current;
-    const drawings = drawRef.current?.getDrawings();
-    const featureCollection = drawings
-      ? createPolygonFeatureCollection(drawings)
-      : { type: "FeatureCollection" as const, features: [] };
-
-    console.log(JSON.stringify(featureCollection, null, 2));
-    console.log("Completed polygons:", featureCollection.features.length);
     setIsSubmitting(true);
 
     try {
       const requestBody: PopulationRequest = {
-        shapes: featureCollection.features.map((feature) => {
-          if (feature.id === undefined) {
-            throw new Error("A completed polygon is missing an id.");
-          }
-
-          return {
-            id: feature.id,
-            geometry: feature.geometry,
-          };
-        }),
+        shapes: currentPopulationShapes(drawRef.current),
       };
 
       const submission = await requestRoundSubmission(
@@ -605,6 +801,9 @@ export function WorldMap({
     (score) => score === MAX_ROUND_SCORE,
   ).length;
   const zeroRounds = roundScores.filter((score) => score === 0).length;
+  const duelRemainingSeconds = duelRound
+    ? Math.max(0, Math.ceil((new Date(duelRound.endsAt).getTime() - duelNow) / 1_000))
+    : 0;
 
   return (
     <>
@@ -613,6 +812,11 @@ export function WorldMap({
         {mapError !== null && (
           <div className="fixed inset-x-3 top-3 z-50 rounded-lg border border-red-300/20 bg-red-950/95 px-4 py-3 text-center text-sm text-red-100 shadow-xl">
             {mapError}
+          </div>
+        )}
+        {duelError !== null && (
+          <div className="fixed inset-x-3 top-3 z-50 rounded-lg border border-red-300/20 bg-red-950/95 px-4 py-3 text-center text-sm text-red-100 shadow-xl">
+            {duelError}
           </div>
         )}
 
@@ -773,7 +977,7 @@ export function WorldMap({
                       difficulty === "EASY" ? "text-cyan-300" : "text-blue-300",
                     )}
                   >
-                    {difficulty}
+                    {isDuel ? "1v1" : difficulty}
                   </div>
                   <div className="text-[0.65rem] leading-tight font-black tracking-[0.08em] text-white/85 uppercase">
                     Round {currentRound}/{ROUND_COUNT}
@@ -782,13 +986,27 @@ export function WorldMap({
                 <span className="h-7 w-px bg-cyan-200/20" aria-hidden="true" />
                 <div>
                   <div className="text-[0.48rem] font-black tracking-[0.14em] text-cyan-300 uppercase">
-                    Total
+                    {isDuel ? "You" : "Total"}
                   </div>
                   <AnimatedNumber
                     value={accumulatedScore}
                     className="block font-mono text-sm leading-tight font-black"
                   />
                 </div>
+                {isDuel && (
+                  <>
+                    <span className="h-7 w-px bg-cyan-200/20" aria-hidden="true" />
+                    <div>
+                      <div className="text-[0.48rem] font-black tracking-[0.14em] text-cyan-300 uppercase">
+                        Opponent
+                      </div>
+                      <AnimatedNumber
+                        value={opponentTotalScore}
+                        className="block font-mono text-sm leading-tight font-black"
+                      />
+                    </div>
+                  </>
+                )}
               </div>
 
               <section className="fixed top-14 left-1/2 z-20 -translate-x-1/2 rounded-xl border border-primary/20 bg-background/92 px-4 py-2 text-center text-foreground shadow-xl backdrop-blur-md md:top-3">
@@ -799,6 +1017,12 @@ export function WorldMap({
                 <div className="font-mono text-2xl leading-none font-black tracking-tight">
                   {integerFormatter.format(target)}
                 </div>
+                {isDuel && (
+                  <div className="mt-1 flex items-center justify-center gap-1 font-mono text-xs font-black text-sky-200">
+                    <Clock3 className="size-3" aria-hidden="true" />
+                    {duelRemainingSeconds}s
+                  </div>
+                )}
               </section>
 
               <div className="fixed top-3 right-3 z-20 flex items-center gap-2">
@@ -813,32 +1037,49 @@ export function WorldMap({
                   <CircleHelp aria-hidden="true" />
                   <span className="hidden sm:inline">Controls</span>
                 </Button>
-                <Button
-                  type="button"
-                  onClick={() => leaveDialogRef.current?.showModal()}
-                  variant="ghost"
-                  size="sm"
-                  className="border border-rose-400/35 bg-slate-950/90 text-xs text-rose-200 shadow-lg backdrop-blur-md hover:border-rose-300/60 hover:bg-rose-950/70 hover:text-rose-100"
-                >
-                  Leave
-                </Button>
+                {!isDuel && (
+                  <Button
+                    type="button"
+                    onClick={() => leaveDialogRef.current?.showModal()}
+                    variant="ghost"
+                    size="sm"
+                    className="border border-rose-400/35 bg-slate-950/90 text-xs text-rose-200 shadow-lg backdrop-blur-md hover:border-rose-300/60 hover:bg-rose-950/70 hover:text-rose-100"
+                  >
+                    Leave
+                  </Button>
+                )}
               </div>
 
               <div className="fixed bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-white/10 bg-background/90 p-2 pl-3 text-foreground shadow-2xl backdrop-blur-md">
                 <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
-                  <Layers3 className="size-4" aria-hidden="true" />
-                  {completedDrawingCount === 1
-                    ? "1 area"
-                    : `${completedDrawingCount} areas`}
+                  {isDuel && opponentSubmitted ? (
+                    <>
+                      <Swords className="size-4 text-primary" aria-hidden="true" />
+                      Opponent submitted
+                    </>
+                  ) : (
+                    <>
+                      <Layers3 className="size-4" aria-hidden="true" />
+                      {completedDrawingCount === 1
+                        ? "1 area"
+                        : `${completedDrawingCount} areas`}
+                    </>
+                  )}
                 </div>
                 <Button
                   type="button"
                   onClick={submitPolygons}
-                  disabled={!isDrawReady || isSubmitting}
+                  disabled={!isDrawReady || isSubmitting || duelSubmitted}
                   className="h-10 px-5 font-black"
                 >
-                  {isSubmitting ? "Submitting…" : "Submit"}
-                  {!isSubmitting && <ChevronRight aria-hidden="true" />}
+                  {duelSubmitted
+                    ? "Waiting…"
+                    : isSubmitting
+                      ? "Submitting…"
+                      : "Submit"}
+                  {!isSubmitting && !duelSubmitted && (
+                    <ChevronRight aria-hidden="true" />
+                  )}
                 </Button>
               </div>
             </>
@@ -895,7 +1136,63 @@ export function WorldMap({
             </div>
           )}
 
-        {isFinalResult && (
+        {isDuel && duelRoundResult !== null && duelOutcome === null && (
+          <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/45 p-4 text-foreground backdrop-blur-[2px] duration-300">
+            <section className="animate-in zoom-in-95 my-auto w-full max-w-lg rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300">
+              <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
+                1v1 · Round {duelRoundResult.roundNumber}
+              </p>
+              <h1 className="mt-2 text-3xl font-black">Round result</h1>
+
+              <div className="mt-6">
+                <ScoreReveal score={duelRoundResult.own.score} />
+              </div>
+
+              <dl className="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
+                <div className="bg-card px-3 py-4">
+                  <dt className="text-[0.6rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Your population
+                  </dt>
+                  <dd className="mt-1 font-mono text-lg font-black">
+                    {integerFormatter.format(
+                      duelRoundResult.own.calculatedPopulation,
+                    )}
+                  </dd>
+                </div>
+                <div className="bg-card px-3 py-4">
+                  <dt className="text-[0.6rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    Opponent score
+                  </dt>
+                  <dd className="mt-1 font-mono text-lg font-black">
+                    {integerFormatter.format(duelRoundResult.opponent.score)}
+                  </dd>
+                </div>
+              </dl>
+
+              <div className="mt-6">
+                <ScoreProgress scores={roundScores} compact />
+              </div>
+
+              <Button
+                type="button"
+                onClick={() => setDuelRoundResult(null)}
+                className="mt-6 h-11 w-full max-w-64 font-black"
+              >
+                {currentRound > duelRoundResult.roundNumber
+                  ? `Play round ${currentRound}`
+                  : "Continue"}
+                <ChevronRight aria-hidden="true" />
+              </Button>
+              {currentRound > duelRoundResult.roundNumber && (
+                <p className="mt-2 font-mono text-xs text-muted-foreground">
+                  {duelRemainingSeconds}s remain on the authoritative clock
+                </p>
+              )}
+            </section>
+          </div>
+        )}
+
+        {!isDuel && isFinalResult && (
           <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/45 p-3 text-foreground backdrop-blur-[2px] duration-300">
             <section className="animate-in zoom-in-95 my-auto w-full max-w-xl rounded-2xl border border-white/10 bg-background/96 p-5 shadow-2xl duration-300 sm:p-7">
               <div className="text-center">
@@ -954,14 +1251,69 @@ export function WorldMap({
           </div>
         )}
 
-        {runtimePlayer === null && isAutoStarting && (
+        {isDuel && duelOutcome !== null && (
+          <div className="animate-in fade-in fixed inset-0 z-40 grid place-items-center overflow-y-auto bg-black/50 p-4 text-foreground backdrop-blur-[2px] duration-300">
+            <section className="animate-in zoom-in-95 my-auto w-full max-w-xl rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300 sm:p-8">
+              <p className="text-xs font-black tracking-[0.2em] text-primary uppercase">
+                1v1 · Duel complete
+              </p>
+              <h1 className="mt-3 text-5xl font-black tracking-tight">
+                {duelOutcome === "WIN"
+                  ? "Victory"
+                  : duelOutcome === "LOSS"
+                    ? "Defeat"
+                    : "Draw"}
+              </h1>
+
+              <dl className="mt-7 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
+                <div className="bg-card px-4 py-5">
+                  <dt className="text-xs font-bold tracking-wider text-primary uppercase">
+                    You
+                  </dt>
+                  <dd className="mt-1 font-mono text-3xl font-black">
+                    {integerFormatter.format(totalScore)}
+                  </dd>
+                </div>
+                <div className="bg-card px-4 py-5">
+                  <dt className="text-xs font-bold tracking-wider text-muted-foreground uppercase">
+                    Opponent
+                  </dt>
+                  <dd className="mt-1 font-mono text-3xl font-black">
+                    {integerFormatter.format(opponentTotalScore)}
+                  </dd>
+                </div>
+              </dl>
+
+              <div className="mt-7">
+                <ScoreProgress scores={roundScores} />
+              </div>
+
+              <div className="mt-7 grid gap-3 sm:grid-cols-2">
+                <Button asChild className="h-11 font-black">
+                  <Link href="/duel-test">
+                    <Swords aria-hidden="true" />
+                    New Duel
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" className="h-11 font-bold">
+                  <Link href="/">
+                    <ArrowLeft aria-hidden="true" />
+                    Back home
+                  </Link>
+                </Button>
+              </div>
+            </section>
+          </div>
+        )}
+
+        {!isDuel && runtimePlayer === null && isAutoStarting && (
           <div className="fixed inset-0 z-40 grid place-items-center bg-black/45">
             <div className="rounded-lg border border-white/10 bg-background/90 px-5 py-3 text-sm font-bold text-foreground shadow-xl backdrop-blur-md">
               Starting {difficulty === "EASY" ? "Easy" : "Real"}…
             </div>
           </div>
         )}
-        {runtimePlayer === null && !isAutoStarting && (
+        {!isDuel && runtimePlayer === null && !isAutoStarting && (
           <div className="fixed inset-0 z-40 grid place-items-center bg-black/50 p-4 backdrop-blur-[2px]">
             <section className="w-full max-w-sm rounded-2xl border border-white/10 bg-background/95 p-6 text-center text-foreground shadow-2xl">
               <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
@@ -1006,6 +1358,56 @@ export function WorldMap({
             </section>
           </div>
         )}
+
+        {isDuel && runtimePlayer === null && (
+          <div className="fixed inset-0 z-40 grid place-items-center bg-black/45 p-4 text-foreground backdrop-blur-[2px]">
+            <section className="w-full max-w-sm rounded-2xl border border-white/10 bg-background/95 p-6 text-center shadow-2xl">
+              <Swords className="mx-auto size-8 text-primary" aria-hidden="true" />
+              <h1 className="mt-4 text-2xl font-black">Connecting to Duel</h1>
+              <p className="mt-2 text-sm text-muted-foreground">
+                {duelConnection === "disconnected"
+                  ? "Connection lost. Retrying…"
+                  : "Opening the live game channel…"}
+              </p>
+            </section>
+          </div>
+        )}
+
+        {isDuel &&
+          runtimePlayer !== null &&
+          duelRound === null &&
+          duelOutcome === null && (
+            <div className="fixed inset-0 z-40 grid place-items-center bg-black/45 p-4 text-foreground backdrop-blur-[2px]">
+              <section className="w-full max-w-lg rounded-2xl border border-white/10 bg-background/95 p-6 text-center shadow-2xl sm:p-8">
+                <Swords className="mx-auto size-9 text-primary" aria-hidden="true" />
+                <p className="mt-5 text-xs font-black tracking-[0.18em] text-primary uppercase">
+                  Direct 1v1
+                </p>
+                <h1 className="mt-2 text-3xl font-black">
+                  Waiting for opponent
+                </h1>
+                <p className="mt-3 text-sm text-muted-foreground">
+                  Open the development launcher in another browser profile and
+                  join with this Duel ID.
+                </p>
+                <code className="mt-5 block select-all break-all rounded-lg border border-border bg-black/35 p-3 font-mono text-sm text-sky-200">
+                  {duelId}
+                </code>
+                <div className="mt-4 flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <span
+                    className={cn(
+                      "size-2 rounded-full",
+                      duelConnection === "connected"
+                        ? "bg-primary"
+                        : "bg-amber-300",
+                    )}
+                  />
+                  {duelConnection === "connected" ? "Connected" : "Reconnecting"}
+                  {duelPlayers.length > 0 && ` · ${duelPlayers.length}/2 players`}
+                </div>
+              </section>
+            </div>
+          )}
       </div>
     </>
   );

@@ -52,10 +52,10 @@ export const singleGamePersistence: SingleGamePersistence = {
           UPDATE games
           SET status = 'ABANDONED',
               end_reason = 'PLAYER_ABANDON',
-              ended_at = $2
+              ended_at = $2::timestamptz
           WHERE games.type = 'SINGLE'
             AND games.status = 'ACTIVE'
-            AND games.started_at < $2 - INTERVAL '1 hour'
+            AND games.started_at < $2::timestamptz - INTERVAL '1 hour'
             AND EXISTS (
               SELECT 1
               FROM game_players
