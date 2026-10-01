@@ -58,7 +58,7 @@ export type DirectDuelEvent = {
   player?: RuntimePlayerSummary;
   players?: RuntimePlayerSummary[];
   difficulty?: GameDifficulty;
-  rated?: false;
+  rated?: boolean;
   preGame?: DirectDuelPreGame;
   round?: DirectDuelRound;
   resultPhase?: DirectDuelResultPhase;
@@ -79,7 +79,7 @@ export type DirectDuelEvent = {
 type DirectDuelSession = {
   duelId: string;
   difficulty: GameDifficulty;
-  rated: false;
+  rated: boolean;
   joinKind: "DUEL_ID" | "INVITE";
   players: RuntimePlayer[];
   game?: RuntimeGame;
@@ -183,7 +183,7 @@ export class DirectDuelService {
   constructor(private readonly options: DirectDuelServiceOptions) {}
 
   create(player: RuntimePlayer, difficulty: GameDifficulty) {
-    const session = this.createSession(player, difficulty, "DUEL_ID");
+    const session = this.createSession(player, difficulty, "DUEL_ID", false);
 
     return {
       duelId: session.duelId,
@@ -194,8 +194,19 @@ export class DirectDuelService {
     };
   }
 
-  createInvite(player: RuntimePlayer, difficulty: GameDifficulty) {
-    const session = this.createSession(player, difficulty, "INVITE");
+  createInvite(
+    player: RuntimePlayer,
+    difficulty: GameDifficulty,
+    rated = false,
+  ) {
+    if (rated && player.kind !== "registered") {
+      throw new DirectDuelError(
+        "Ranked matchmaking requires registered players.",
+        403,
+      );
+    }
+
+    const session = this.createSession(player, difficulty, "INVITE", rated);
     const inviteToken = this.options.generateInviteToken();
     if (this.invites.has(inviteToken)) {
       this.sessions.delete(session.duelId);
@@ -216,7 +227,7 @@ export class DirectDuelService {
       inviteExpiresAt: expiresAt.toISOString(),
       player: toRuntimePlayerSummary(player),
       difficulty,
-      rated: false as const,
+      rated,
       status: "WAITING" as const,
     };
   }
@@ -225,6 +236,7 @@ export class DirectDuelService {
     player: RuntimePlayer,
     difficulty: GameDifficulty,
     joinKind: DirectDuelSession["joinKind"],
+    rated: boolean,
   ) {
     const duelId = this.options.generateDuelId();
     if (this.sessions.has(duelId)) {
@@ -234,7 +246,7 @@ export class DirectDuelService {
     this.sessions.set(duelId, {
       duelId,
       difficulty,
-      rated: false,
+      rated,
       joinKind,
       players: [player],
       sequence: 0,
@@ -246,7 +258,7 @@ export class DirectDuelService {
 
   join(player: RuntimePlayer, duelId: string) {
     const session = this.session(duelId);
-    if (session.joinKind === "INVITE") {
+    if (session.joinKind !== "DUEL_ID") {
       throw new DirectDuelError("This Duel requires its invite link.", 403);
     }
     const existingPlayer = session.players.find((candidate) =>
@@ -300,6 +312,12 @@ export class DirectDuelService {
     }
     if (session.players.length >= 2) {
       throw new DirectDuelError("The Duel is full.", 409);
+    }
+    if (session.rated && player.kind !== "registered") {
+      throw new DirectDuelError(
+        "Ranked matchmaking requires registered players.",
+        403,
+      );
     }
 
     session.players.push(player);
@@ -839,4 +857,15 @@ export class DirectDuelService {
     }
     return participant;
   }
+}
+
+export function createMatchmadeDuel(
+  duels: DirectDuelService,
+  firstPlayer: RuntimePlayer,
+  secondPlayer: RuntimePlayer,
+  difficulty: GameDifficulty,
+  rated: boolean,
+) {
+  const invitation = duels.createInvite(firstPlayer, difficulty, rated);
+  return duels.joinInvite(secondPlayer, invitation.inviteToken);
 }

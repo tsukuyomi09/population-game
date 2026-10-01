@@ -280,7 +280,7 @@ export function ProfileView({ username, avatarId, stats }: ProfileViewProps) {
             {username}
           </h1>
           <div className="mt-6 flex w-full max-w-sm justify-center">
-            <PlayModeDialog />
+            <PlayModeDialog isRegistered />
           </div>
         </header>
 

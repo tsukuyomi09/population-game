@@ -310,7 +310,7 @@ export default async function Home() {
             </p>
 
             <div className="mt-9 flex w-full max-w-sm flex-col justify-center gap-3 sm:max-w-none sm:flex-row">
-              <PlayModeDialog />
+              <PlayModeDialog isRegistered={isRegistered} />
               <AccountAction
                 isGoogleAuthenticated={isGoogleAuthenticated}
                 isRegistered={isRegistered}

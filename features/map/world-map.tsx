@@ -444,6 +444,7 @@ export function WorldMap({
     "connecting" | "connected" | "disconnected"
   >(isDuel ? "connecting" : "disconnected");
   const [duelPlayers, setDuelPlayers] = useState<RuntimePlayerSummary[]>([]);
+  const [duelRated, setDuelRated] = useState(false);
   const [activeDuelId, setActiveDuelId] = useState<string | null>(
     duelId ?? null,
   );
@@ -845,12 +846,14 @@ export function WorldMap({
       if (event.type === "waiting_for_opponent") {
         if (event.players) setDuelPlayers(event.players);
         if (event.difficulty) setDifficulty(event.difficulty);
+        if (typeof event.rated === "boolean") setDuelRated(event.rated);
         setDuelPreGame(null);
       }
 
       if (event.type === "pre_game_started" && event.preGame) {
         if (event.players) setDuelPlayers(event.players);
         if (event.difficulty) setDifficulty(event.difficulty);
+        if (typeof event.rated === "boolean") setDuelRated(event.rated);
         setDuelPreGame(event.preGame);
         setDuelNow(Date.now());
       }
@@ -858,6 +861,7 @@ export function WorldMap({
       if (event.type === "game_started" && event.players) {
         setDuelPlayers(event.players);
         if (event.difficulty) setDifficulty(event.difficulty);
+        if (typeof event.rated === "boolean") setDuelRated(event.rated);
         setDuelPreGame(null);
       }
 
@@ -1269,7 +1273,7 @@ export function WorldMap({
                       difficulty === "EASY" ? "text-cyan-300" : "text-blue-300",
                     )}
                   >
-                    {isDuel ? "1v1" : difficulty}
+                    {isDuel ? (duelRated ? "Ranked" : "1v1") : difficulty}
                   </div>
                   <div className="text-[0.65rem] leading-tight font-black tracking-[0.08em] text-white/85 uppercase">
                     Round {currentRound}/{ROUND_COUNT}
@@ -1455,7 +1459,8 @@ export function WorldMap({
                 </div>
               )}
               <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
-                1v1 · Round {duelRoundResult.roundNumber}
+                {duelRated ? "Ranked" : "1v1"} · Round {" "}
+                {duelRoundResult.roundNumber}
               </p>
               <h1 className="mt-2 text-3xl font-black">Round result</h1>
 
@@ -1586,8 +1591,8 @@ export function WorldMap({
             <section className="animate-in zoom-in-95 my-auto w-full max-w-xl rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300 sm:p-8">
               <p className="text-xs font-black tracking-[0.2em] text-primary uppercase">
                 {duelAbandonRole === "OPPONENT"
-                  ? "1v1 · Opponent abandoned"
-                  : "1v1 · Duel complete"}
+                  ? `${duelRated ? "Ranked" : "1v1"} · Opponent abandoned`
+                  : `${duelRated ? "Ranked" : "1v1"} · Duel complete`}
               </p>
               <h1 className="mt-3 text-5xl font-black tracking-tight">
                 {duelAbandonRole === "OPPONENT"
@@ -1643,7 +1648,7 @@ export function WorldMap({
               ) : (
                 <div className="mt-7 grid gap-3 sm:grid-cols-2">
                   <Button asChild className="h-11 font-black">
-                    <Link href="/duel-test">
+                    <Link href="/">
                       <Swords aria-hidden="true" />
                       New Duel
                     </Link>
@@ -1746,7 +1751,9 @@ export function WorldMap({
               <section className="w-full max-w-lg rounded-2xl border border-white/10 bg-background/95 p-6 text-center shadow-2xl sm:p-8">
                 <Swords className="mx-auto size-9 text-primary" aria-hidden="true" />
                 <p className="mt-5 text-xs font-black tracking-[0.18em] text-primary uppercase">
-                  1v1 · {difficulty === "EASY" ? "Easy" : "Real"} · Unrated
+                  {duelRated ? "Ranked" : "1v1"} · {" "}
+                  {difficulty === "EASY" ? "Easy" : "Real"} · {" "}
+                  {duelRated ? "Rated" : "Unrated"}
                 </p>
                 {duelPreGame ? (
                   <>

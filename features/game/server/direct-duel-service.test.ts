@@ -7,9 +7,11 @@ import type {
   RuntimePlayer,
 } from "../runtime-player";
 import {
+  createMatchmadeDuel,
   DirectDuelService,
   type DirectDuelEvent,
 } from "./direct-duel-service";
+import { MatchmakingService } from "./matchmaking-service";
 
 function guest(id: string): GuestRuntimePlayer {
   return {
@@ -112,6 +114,56 @@ test("guest and registered creators make unrated short-lived invites", () => {
       600_000,
     );
   }
+});
+
+test("matchmaking uses the canonical invite factory and keeps the pre-game countdown", () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const matchmaking = new MatchmakingService(
+    (firstPlayer, secondPlayer, difficulty, rated) =>
+      createMatchmadeDuel(
+        duels,
+        firstPlayer,
+        secondPlayer,
+        difficulty,
+        rated,
+      ),
+  );
+  const first = registered("member-a");
+  const second = registered("member-b");
+  assert.equal(matchmaking.join(first, "RANKED", "REAL").status, "WAITING");
+  const created = matchmaking.join(second, "RANKED", "REAL");
+  const events: DirectDuelEvent[] = [];
+
+  assert.equal(created.status, "MATCHED");
+  assert.equal(created.rated, true);
+  assert.equal(runtime.activeTimerCount(), 1);
+  duels.subscribe(created.duelId, first, (event) => events.push(event));
+  const preGame = events.find(
+    (event) => event.type === "pre_game_started",
+  );
+  assert.equal(preGame?.rated, true);
+  assert.equal(preGame?.players?.length, 2);
+  assert.ok(preGame?.preGame);
+
+  runtime.fireNextTimerAt(preGame.preGame.endsAt);
+  assert.equal(events.find((event) => event.type === "game_started")?.rated, true);
+  assert.equal(
+    events.filter((event) => event.type === "round_started").length,
+    1,
+  );
+
+  assert.throws(
+    () =>
+      createMatchmadeDuel(
+        service(new FakeRuntime()),
+        guest("guest"),
+        second,
+        "EASY",
+        true,
+      ),
+    /requires registered players/,
+  );
 });
 
 test("invite identity combinations join the same Duel and start once after countdown", async (t) => {

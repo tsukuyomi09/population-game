@@ -1,12 +1,13 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
   Crosshair,
   Link2,
+  ShieldCheck,
   Sparkles,
   Swords,
   UserRound,
@@ -19,6 +20,14 @@ import {
 } from "@/components/desktop-play-gate";
 import { Button } from "@/components/ui/button";
 import { requestDirectDuelInviteCreate } from "@/features/game/direct-duel";
+import {
+  requestMatchmakingJoin,
+  requestMatchmakingLeave,
+} from "@/features/game/matchmaking";
+import type {
+  MatchmakingEvent,
+  MatchmakingIntent,
+} from "@/features/game/server/matchmaking-service";
 import type { GameDifficulty } from "@/features/game/single-player";
 
 const modes = [
@@ -42,16 +51,84 @@ const modes = [
   },
 ] as const;
 
-export function PlayModeDialog() {
+export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
   const router = useRouter();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const desktopRequiredDialogRef = useRef<HTMLDialogElement>(null);
   const [selectedMode, setSelectedMode] =
-    useState<"SINGLE" | "DUEL">("SINGLE");
+    useState<"SINGLE" | "DUEL" | "RANKED">("SINGLE");
   const [duelDifficulty, setDuelDifficulty] =
     useState<GameDifficulty>("EASY");
   const [isCreatingInvite, setIsCreatingInvite] = useState(false);
+  const [isJoiningQueue, setIsJoiningQueue] = useState(false);
+  const [queuedIntent, setQueuedIntent] =
+    useState<MatchmakingIntent | null>(null);
   const [inviteError, setInviteError] = useState<string | null>(null);
+
+  const enterMatch = (duelId: string) => {
+    dialogRef.current?.close();
+    router.push(
+      `/game?duelId=${encodeURIComponent(duelId)}` +
+        `&difficulty=${duelDifficulty}`,
+    );
+  };
+
+  useEffect(() => {
+    if (!queuedIntent) return;
+
+    const source = new EventSource("/api/duel/matchmaking");
+    source.onmessage = (message) => {
+      const event = JSON.parse(message.data) as MatchmakingEvent;
+      if (event.status === "MATCHED") {
+        setQueuedIntent(null);
+        enterMatch(event.duelId);
+      } else if (event.status === "LEFT") {
+        setQueuedIntent(null);
+        setInviteError("Matchmaking stopped. Join the queue to try again.");
+      }
+    };
+    source.onerror = () => {
+      setInviteError("Matchmaking connection lost. Reconnecting…");
+    };
+
+    return () => source.close();
+  }, [queuedIntent]);
+
+  const findPlayer = async (intent: MatchmakingIntent) => {
+    if (isJoiningQueue || queuedIntent) return;
+
+    setIsJoiningQueue(true);
+    setInviteError(null);
+    try {
+      const state = await requestMatchmakingJoin(intent, duelDifficulty);
+      if (state.status === "MATCHED") {
+        enterMatch(state.duelId);
+      } else {
+        setQueuedIntent(intent);
+      }
+    } catch (error) {
+      setInviteError(
+        error instanceof Error ? error.message : "Could not join matchmaking.",
+      );
+    } finally {
+      setIsJoiningQueue(false);
+    }
+  };
+
+  const cancelMatchmaking = async () => {
+    if (!queuedIntent) return;
+
+    try {
+      const state = await requestMatchmakingLeave();
+      if (state.status === "MATCHED") {
+        enterMatch(state.duelId);
+        return;
+      }
+    } catch {
+      // Closing the EventSource also removes an unmatched queue entry server-side.
+    }
+    setQueuedIntent(null);
+  };
 
   const createInvite = async () => {
     if (isCreatingInvite) return;
@@ -114,6 +191,7 @@ export function PlayModeDialog() {
         onClick={(event) => {
           if (event.target === event.currentTarget) event.currentTarget.close();
         }}
+        onClose={() => void cancelMatchmaking()}
       >
         <div className="relative p-5 sm:p-7">
           <div className="pr-12">
@@ -136,12 +214,13 @@ export function PlayModeDialog() {
           <div
             role="group"
             aria-label="Game mode"
-            className="mt-6 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-background/45"
+            className="mt-6 grid grid-cols-3 overflow-hidden rounded-xl border border-border bg-background/45"
           >
             <Button
               type="button"
               variant="ghost"
               onClick={() => setSelectedMode("SINGLE")}
+              disabled={queuedIntent !== null}
               aria-pressed={selectedMode === "SINGLE"}
               className={`h-12 rounded-none font-black ${
                 selectedMode === "SINGLE"
@@ -156,6 +235,7 @@ export function PlayModeDialog() {
               type="button"
               variant="ghost"
               onClick={() => setSelectedMode("DUEL")}
+              disabled={queuedIntent !== null}
               aria-pressed={selectedMode === "DUEL"}
               className={`h-12 rounded-none border-l border-border font-black ${
                 selectedMode === "DUEL"
@@ -165,6 +245,21 @@ export function PlayModeDialog() {
             >
               <Swords aria-hidden="true" />
               1v1
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setSelectedMode("RANKED")}
+              disabled={queuedIntent !== null}
+              aria-pressed={selectedMode === "RANKED"}
+              className={`h-12 rounded-none border-l border-border font-black ${
+                selectedMode === "RANKED"
+                  ? "bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              <ShieldCheck aria-hidden="true" />
+              Ranked
             </Button>
           </div>
 
@@ -228,68 +323,111 @@ export function PlayModeDialog() {
             </div>
           ) : (
             <div className="mt-4">
-              <p className="text-sm font-bold text-foreground">
-                Choose difficulty
-              </p>
-              <div
-                role="group"
-                aria-label="1v1 difficulty"
-                className="mt-3 grid grid-cols-2 gap-3"
-              >
-                {(["EASY", "REAL"] as const).map((difficulty) => (
-                  <button
-                    key={difficulty}
+              {queuedIntent ? (
+                <div className="rounded-xl border border-primary/30 bg-primary/8 p-7 text-center">
+                  <UsersRound
+                    className="mx-auto size-9 animate-pulse text-primary"
+                    aria-hidden="true"
+                  />
+                  <h3 className="mt-4 text-2xl font-black">Finding a player</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {queuedIntent === "RANKED" ? "Ranked" : "1v1"} · {" "}
+                    {duelDifficulty === "EASY" ? "Easy" : "Real"}
+                  </p>
+                  <Button
                     type="button"
-                    onClick={() => setDuelDifficulty(difficulty)}
-                    aria-pressed={duelDifficulty === difficulty}
-                    className={`rounded-xl border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
-                      duelDifficulty === difficulty
-                        ? "border-primary/60 bg-primary/10"
-                        : "border-border bg-background/45 hover:border-primary/35 hover:bg-background/80"
-                    }`}
+                    variant="outline"
+                    onClick={() => void cancelMatchmaking()}
+                    className="mt-5 h-11 w-full font-black"
                   >
-                    {difficulty === "EASY" ? (
-                      <Sparkles
-                        className="size-6 text-primary"
-                        aria-hidden="true"
-                      />
-                    ) : (
-                      <Crosshair
-                        className="size-6 text-sky-300"
-                        aria-hidden="true"
-                      />
-                    )}
-                    <span className="mt-4 block text-xl font-black capitalize">
-                      {difficulty.toLowerCase()}
-                    </span>
-                  </button>
-                ))}
-              </div>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <p className="text-sm font-bold text-foreground">
+                    Choose difficulty
+                  </p>
+                  <div
+                    role="group"
+                    aria-label={`${selectedMode === "RANKED" ? "Ranked" : "1v1"} difficulty`}
+                    className="mt-3 grid grid-cols-2 gap-3"
+                  >
+                    {(["EASY", "REAL"] as const).map((difficulty) => (
+                      <button
+                        key={difficulty}
+                        type="button"
+                        onClick={() => setDuelDifficulty(difficulty)}
+                        aria-pressed={duelDifficulty === difficulty}
+                        className={`rounded-xl border p-5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
+                          duelDifficulty === difficulty
+                            ? "border-primary/60 bg-primary/10"
+                            : "border-border bg-background/45 hover:border-primary/35 hover:bg-background/80"
+                        }`}
+                      >
+                        {difficulty === "EASY" ? (
+                          <Sparkles
+                            className="size-6 text-primary"
+                            aria-hidden="true"
+                          />
+                        ) : (
+                          <Crosshair
+                            className="size-6 text-sky-300"
+                            aria-hidden="true"
+                          />
+                        )}
+                        <span className="mt-4 block text-xl font-black capitalize">
+                          {difficulty.toLowerCase()}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
 
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <Button
-                  type="button"
-                  onClick={() => void createInvite()}
-                  disabled={isCreatingInvite}
-                  className="h-12 font-black"
-                >
-                  <Link2 aria-hidden="true" />
-                  {isCreatingInvite ? "Creating…" : "Invite Player"}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled
-                  className="h-12 font-black"
-                >
-                  <UsersRound aria-hidden="true" />
-                  Find Player · Soon
-                </Button>
-              </div>
+                  {selectedMode === "DUEL" ? (
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <Button
+                        type="button"
+                        onClick={() => void createInvite()}
+                        disabled={isCreatingInvite || isJoiningQueue}
+                        className="h-12 font-black"
+                      >
+                        <Link2 aria-hidden="true" />
+                        {isCreatingInvite ? "Creating…" : "Invite Player"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => void findPlayer("DUEL")}
+                        disabled={isCreatingInvite || isJoiningQueue}
+                        className="h-12 font-black"
+                      >
+                        <UsersRound aria-hidden="true" />
+                        {isJoiningQueue ? "Joining…" : "Find Player"}
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={() => void findPlayer("RANKED")}
+                      disabled={!isRegistered || isJoiningQueue}
+                      className="mt-4 h-12 w-full font-black"
+                    >
+                      <ShieldCheck aria-hidden="true" />
+                      {!isRegistered
+                        ? "Registered account required"
+                        : isJoiningQueue
+                          ? "Joining…"
+                          : "Find Ranked Player"}
+                    </Button>
+                  )}
 
-              <p className="mt-3 text-center text-xs text-muted-foreground">
-                Direct 1v1 is unrated. Guests and registered players can join.
-              </p>
+                  <p className="mt-3 text-center text-xs text-muted-foreground">
+                    {selectedMode === "RANKED"
+                      ? "Ranked is rated and available to registered players only."
+                      : "1v1 is unrated. Guests and registered players can join."}
+                  </p>
+                </>
+              )}
               {inviteError && (
                 <p className="mt-3 rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
                   {inviteError}

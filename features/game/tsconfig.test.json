@@ -13,6 +13,8 @@
   "files": [
     "server/direct-duel-service.test.ts",
     "server/direct-duel-service.ts",
+    "server/matchmaking-service.test.ts",
+    "server/matchmaking-service.ts",
     "server/runtime-game.test.ts",
     "server/runtime-game.ts",
     "server/runtime-submission.test.ts",

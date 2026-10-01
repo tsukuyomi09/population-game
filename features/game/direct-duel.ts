@@ -14,7 +14,7 @@ type DirectDuelStart = {
   duelId: string;
   player: RuntimePlayerSummary;
   difficulty?: GameDifficulty;
-  rated?: false;
+  rated?: boolean;
   round?: DirectDuelRound;
 };
 
@@ -55,7 +55,7 @@ function directDuelStart(data: Record<string, unknown>): DirectDuelStart {
     difficulty: isGameDifficulty(data.difficulty)
       ? data.difficulty
       : undefined,
-    rated: data.rated === false ? false : undefined,
+    rated: typeof data.rated === "boolean" ? data.rated : undefined,
     round: data.round as DirectDuelRound | undefined,
   };
 }

@@ -19,6 +19,7 @@
     "test:game-identity": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/runtime-player.test.js",
     "test:game-runtime": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/server/runtime-game.test.js artifacts/game/identity-tests/features/game/server/runtime-submission.test.js",
     "test:direct-duel": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/server/direct-duel-service.test.js",
+    "test:matchmaking": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/server/matchmaking-service.test.js",
     "test:single-persistence": "tsc --project features/game/server/tsconfig.test.json && node --test artifacts/game/single-persistence-tests/features/game/server/single-game-service.test.js",
     "test:single-leaderboard": "tsc --project features/leaderboard/server/tsconfig.test.json && node --test artifacts/leaderboard/tests/features/leaderboard/server/single-leaderboard.test.js",
     "test:population-adapter": "tsc --project features/population/server/tsconfig.test.json && node --test artifacts/population/adapter-tests/features/population/server/population-service-client.test.js"
