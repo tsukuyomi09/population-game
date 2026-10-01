@@ -10,6 +10,7 @@ import {
   createMatchmadeDuel,
   DirectDuelService,
   type DirectDuelEvent,
+  type DirectDuelFinalizationInput,
 } from "./direct-duel-service";
 import { MatchmakingService } from "./matchmaking-service";
 
@@ -81,7 +82,10 @@ class FakeRuntime {
   }
 }
 
-function service(runtime: FakeRuntime) {
+function service(
+  runtime: FakeRuntime,
+  finalizeDuel?: (input: DirectDuelFinalizationInput) => Promise<unknown>,
+) {
   return new DirectDuelService({
     generateDuelId: () => "duel-1",
     generateInviteToken: () => "invite-token-123456",
@@ -93,6 +97,7 @@ function service(runtime: FakeRuntime) {
     resultPhaseDurationMs: 10_000,
     now: () => new Date(runtime.now),
     schedule: runtime.schedule,
+    finalizeDuel,
   });
 }
 
@@ -116,13 +121,14 @@ test("guest and registered creators make unrated short-lived invites", () => {
   }
 });
 
-test("matchmaking uses the canonical invite factory and keeps the pre-game countdown", () => {
+test("matchmaking creates a Duel retrievable through the canonical runtime lookup", () => {
   const runtime = new FakeRuntime();
   const duels = service(runtime);
+  const canonicalDuels = () => duels;
   const matchmaking = new MatchmakingService(
     (firstPlayer, secondPlayer, difficulty, rated) =>
       createMatchmadeDuel(
-        duels,
+        canonicalDuels(),
         firstPlayer,
         secondPlayer,
         difficulty,
@@ -138,7 +144,9 @@ test("matchmaking uses the canonical invite factory and keeps the pre-game count
   assert.equal(created.status, "MATCHED");
   assert.equal(created.rated, true);
   assert.equal(runtime.activeTimerCount(), 1);
-  duels.subscribe(created.duelId, first, (event) => events.push(event));
+  canonicalDuels().subscribe(created.duelId, first, (event) =>
+    events.push(event),
+  );
   const preGame = events.find(
     (event) => event.type === "pre_game_started",
   );
@@ -164,6 +172,39 @@ test("matchmaking uses the canonical invite factory and keeps the pre-game count
       ),
     /requires registered players/,
   );
+});
+
+test("Ranked abandon invokes terminal persistence exactly once", async () => {
+  const runtime = new FakeRuntime();
+  const finalizations: DirectDuelFinalizationInput[] = [];
+  const duels = service(runtime, async (input) => {
+    finalizations.push(input);
+  });
+  const first = registered("member-a");
+  const second = registered("member-b");
+  const created = createMatchmadeDuel(
+    duels,
+    first,
+    second,
+    "REAL",
+    true,
+  );
+  if (created.status !== "COUNTDOWN") {
+    throw new Error("Ranked match did not enter its pre-game countdown.");
+  }
+  runtime.fireNextTimerAt(created.preGame.endsAt);
+
+  assert.equal((await duels.abandon(created.duelId, first)).status, "APPLIED");
+  assert.equal((await duels.abandon(created.duelId, first)).status, "DUPLICATE");
+  assert.equal(finalizations.length, 1);
+  assert.equal(finalizations[0]?.rated, true);
+  assert.equal(finalizations[0]?.difficulty, "REAL");
+  assert.equal(finalizations[0]?.completionReason, "ABANDON");
+  assert.equal(
+    finalizations[0]?.abandonedRuntimePlayerId,
+    first.runtimePlayerId,
+  );
+  assert.equal(finalizations[0]?.rounds.length, 1);
 });
 
 test("invite identity combinations join the same Duel and start once after countdown", async (t) => {
@@ -651,9 +692,9 @@ test("active-round abandon sends one terminal LOSS/WIN result", async () => {
   duels.join(second, duelId);
   duels.subscribe(duelId, second, (event) => secondEvents.push(event));
 
-  const abandoned = duels.abandon(duelId, first);
+  const abandoned = await duels.abandon(duelId, first);
   const eventCount = firstEvents.length + secondEvents.length;
-  const duplicate = duels.abandon(duelId, first);
+  const duplicate = await duels.abandon(duelId, first);
   const firstCompletion = firstEvents.find(
     (event) => event.type === "game_completed",
   );
@@ -733,7 +774,7 @@ test("abandon during result animation is terminal without starting result wait",
     population,
   );
 
-  const abandoned = duels.abandon(duelId, first);
+  const abandoned = await duels.abandon(duelId, first);
 
   assert.equal(abandoned.status, "APPLIED");
   assert.equal(
@@ -782,7 +823,7 @@ test("abandon during result waiting cancels auto-advance", async () => {
   duels.completeResultAnimation(duelId, second, 1);
   assert.equal(runtime.activeTimerCount(), 1);
 
-  const abandoned = duels.abandon(duelId, second);
+  const abandoned = await duels.abandon(duelId, second);
 
   assert.equal(abandoned.status, "APPLIED");
   assert.equal(runtime.activeTimerCount(), 0);

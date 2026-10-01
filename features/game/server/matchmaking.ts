@@ -1,8 +1,11 @@
 import "server-only";
-import { createMatchmadeDuel } from "./direct-duels";
+import {
+  createMatchmadeDuel,
+  DIRECT_DUEL_API_VERSION,
+} from "./direct-duels";
 import { MatchmakingService } from "./matchmaking-service";
 
-const MATCHMAKING_API_VERSION = 2;
+const MATCHMAKING_API_VERSION = DIRECT_DUEL_API_VERSION;
 
 const globalForMatchmaking = globalThis as typeof globalThis & {
   worldrawingMatchmaking?: MatchmakingService;

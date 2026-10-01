@@ -13,7 +13,10 @@
   "files": [
     "current-ratings.test.ts",
     "current-ratings.ts",
+    "ranked-duel-finalization.test.ts",
+    "ranked-duel-finalization.ts",
     "../../database/server/client.ts",
+    "../../game/runtime-player.ts",
     "../../game/single-player.ts"
   ]
 }

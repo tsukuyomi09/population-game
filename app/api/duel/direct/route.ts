@@ -166,7 +166,7 @@ export async function POST(request: Request) {
 
     if (body.action === "ABANDON") {
       return Response.json(
-        directDuels().abandon(duelId(body.duelId), player),
+        await directDuels().abandon(duelId(body.duelId), player),
       );
     }
 

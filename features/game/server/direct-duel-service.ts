@@ -37,6 +37,21 @@ export type DirectDuelPreGame = {
   endsAt: string;
 };
 
+export type DirectDuelFinalizationInput = {
+  runtimeGameId: string;
+  difficulty: GameDifficulty;
+  rated: boolean;
+  players: readonly [
+    { player: RuntimePlayer; totalScore: number },
+    { player: RuntimePlayer; totalScore: number },
+  ];
+  rounds: RuntimeGameSnapshot["rounds"];
+  completionReason: DirectDuelCompletionReason;
+  abandonedRuntimePlayerId?: string;
+  startedAt: Date;
+  endedAt: Date;
+};
+
 export type DirectDuelEvent = {
   sequence: number;
   duelId: string;
@@ -92,6 +107,8 @@ type DirectDuelSession = {
   cancelPreGameTimer?: () => void;
   cancelRoundTimer?: () => void;
   cancelResultTimer?: () => void;
+  completionSent?: boolean;
+  finalizationPromise?: Promise<void>;
 };
 
 type DirectDuelInvite = {
@@ -111,6 +128,7 @@ type DirectDuelServiceOptions = {
   resultPhaseDurationMs: number;
   now: () => Date;
   schedule: (callback: () => void, delayMs: number) => () => void;
+  finalizeDuel?: (input: DirectDuelFinalizationInput) => Promise<unknown>;
 };
 
 type CalculatePopulation = (shapes: PopulationShape[]) => Promise<number>;
@@ -451,7 +469,13 @@ export class DirectDuelService {
       throw error;
     }
 
-    if (resolution.status === "DUPLICATE") return resolution;
+    if (resolution.status === "DUPLICATE") {
+      const snapshot = game.snapshot();
+      if (snapshot.state === "COMPLETE") {
+        await this.completeSession(session, snapshot);
+      }
+      return resolution;
+    }
 
     this.sendToPlayer(session, player.runtimePlayerId, {
       type: "submission_accepted",
@@ -499,7 +523,7 @@ export class DirectDuelService {
       session.cancelRoundTimer = undefined;
 
       if (resolution.gameFinalized) {
-        this.sendCompletion(session, snapshot);
+        await this.completeSession(session, snapshot);
       }
     }
 
@@ -533,7 +557,7 @@ export class DirectDuelService {
     return completion;
   }
 
-  abandon(duelId: string, player: RuntimePlayer) {
+  async abandon(duelId: string, player: RuntimePlayer) {
     const session = this.session(duelId);
     this.sessionPlayer(session, player);
     const game = session.game;
@@ -554,14 +578,11 @@ export class DirectDuelService {
       session.cancelRoundTimer = undefined;
       session.cancelResultTimer?.();
       session.cancelResultTimer = undefined;
+    }
 
-      this.sendToOpponent(session, player.runtimePlayerId, {
-        type: "opponent_abandoned",
-        completionReason: "ABANDON",
-        abandonedRuntimePlayerId:
-          abandonment.abandonment.abandonedRuntimePlayerId,
-      });
-      this.sendCompletion(session, game.snapshot());
+    const snapshot = game.snapshot();
+    if (snapshot.state === "COMPLETE") {
+      await this.completeSession(session, snapshot);
     }
 
     return abandonment;
@@ -800,6 +821,72 @@ export class DirectDuelService {
       opponentTotalScore: firstTotal,
       totals: snapshot.totals,
     });
+  }
+
+  private async completeSession(
+    session: DirectDuelSession,
+    snapshot: RuntimeGameSnapshot,
+  ) {
+    if (session.completionSent) return;
+    if (session.finalizationPromise) return session.finalizationPromise;
+
+    const finalization = (async () => {
+      const [first, second] = session.players;
+      const startedAt = snapshot.rounds[0]?.startedAt;
+      const endedAt = snapshot.completedAt;
+      if (!first || !second || !startedAt || !endedAt) {
+        throw new Error("Completed Duel is missing finalization state.");
+      }
+
+      await this.options.finalizeDuel?.({
+        runtimeGameId: session.duelId,
+        difficulty: session.difficulty,
+        rated: session.rated,
+        players: [
+          {
+            player: first,
+            totalScore: snapshot.totals[first.runtimePlayerId] ?? 0,
+          },
+          {
+            player: second,
+            totalScore: snapshot.totals[second.runtimePlayerId] ?? 0,
+          },
+        ],
+        rounds: snapshot.rounds,
+        completionReason: snapshot.abandonment
+          ? "ABANDON"
+          : "ROUNDS_COMPLETE",
+        abandonedRuntimePlayerId:
+          snapshot.abandonment?.abandonedRuntimePlayerId,
+        startedAt,
+        endedAt,
+      });
+
+      if (session.completionSent) return;
+      if (snapshot.abandonment) {
+        this.sendToOpponent(
+          session,
+          snapshot.abandonment.abandonedRuntimePlayerId,
+          {
+            type: "opponent_abandoned",
+            completionReason: "ABANDON",
+            abandonedRuntimePlayerId:
+              snapshot.abandonment.abandonedRuntimePlayerId,
+          },
+        );
+      }
+      this.sendCompletion(session, snapshot);
+      session.completionSent = true;
+    })();
+
+    session.finalizationPromise = finalization;
+    try {
+      await finalization;
+    } finally {
+      if (session.finalizationPromise === finalization) {
+        session.finalizationPromise = undefined;
+      }
+    }
   }
 
   private broadcast(
