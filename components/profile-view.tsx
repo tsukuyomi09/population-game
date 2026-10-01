@@ -23,7 +23,11 @@ import {
   logoutAccount,
   updateProfileAvatar,
 } from "@/features/account/server/profile-actions";
-import type { SingleProfileStats } from "@/features/account/server/profile-stats";
+import type {
+  DuelProfileMode,
+  DuelProfileStatsByDifficulty,
+  SingleProfileStats,
+} from "@/features/account/server/profile-stats";
 import type { GameDifficulty } from "@/features/game/single-player";
 import type { CurrentRankedRatings } from "@/features/rating/server/current-ratings";
 
@@ -32,6 +36,7 @@ type ProfileViewProps = {
   avatarId: string;
   stats: Record<GameDifficulty, SingleProfileStats>;
   rankedRatings: CurrentRankedRatings;
+  duelStats: DuelProfileStatsByDifficulty;
 };
 
 function PendingButton({
@@ -242,9 +247,14 @@ export function ProfileView({
   avatarId,
   stats,
   rankedRatings,
+  duelStats,
 }: ProfileViewProps) {
   const [difficulty, setDifficulty] = useState<GameDifficulty>("EASY");
+  const [duelDifficulty, setDuelDifficulty] =
+    useState<GameDifficulty>("EASY");
+  const [duelMode, setDuelMode] = useState<DuelProfileMode>("DUEL");
   const selectedStats = stats[difficulty];
+  const selectedDuelStats = duelStats[duelDifficulty][duelMode];
   const avatar = avatarDefinition(avatarId);
   const statItems = [
     ["Best score", selectedStats.bestScore.toLocaleString("en-US")],
@@ -252,6 +262,13 @@ export function ProfileView({
     ["Average score", selectedStats.averageScore.toLocaleString("en-US")],
     ["Perfect rounds", selectedStats.perfectRounds.toLocaleString("en-US")],
     ["Zero rounds", selectedStats.zeroRounds.toLocaleString("en-US")],
+  ] as const;
+  const duelStatItems = [
+    ["Wins", selectedDuelStats.wins.toLocaleString("en-US")],
+    ["Losses", selectedDuelStats.losses.toLocaleString("en-US")],
+    ["Draws", selectedDuelStats.draws.toLocaleString("en-US")],
+    ["Perfect rounds", selectedDuelStats.perfectRounds.toLocaleString("en-US")],
+    ["Zero rounds", selectedDuelStats.zeroRounds.toLocaleString("en-US")],
   ] as const;
 
   return (
@@ -369,6 +386,81 @@ export function ProfileView({
 
           <dl className="mt-6 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-5">
             {statItems.map(([label, value], index) => (
+              <div
+                key={label}
+                className={`bg-card px-4 py-5 text-center ${index === 4 ? "col-span-2 sm:col-span-1" : ""}`}
+              >
+                <dt className="text-[0.65rem] font-bold tracking-wider text-muted-foreground uppercase">
+                  {label}
+                </dt>
+                <dd className="mt-2 font-mono text-2xl font-black">{value}</dd>
+              </div>
+            ))}
+          </dl>
+        </section>
+
+        <section className="mt-10" aria-labelledby="duel-stats-heading">
+          <div className="flex flex-col gap-5 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
+                Duel
+              </p>
+              <h2 id="duel-stats-heading" className="mt-2 text-3xl font-black">
+                Competitive record
+              </h2>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <div
+                role="tablist"
+                aria-label="Duel mode"
+                className="grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-card"
+              >
+                {(["DUEL", "RANKED"] as const).map((option) => (
+                  <Button
+                    key={option}
+                    type="button"
+                    role="tab"
+                    aria-selected={duelMode === option}
+                    variant="ghost"
+                    onClick={() => setDuelMode(option)}
+                    className={
+                      duelMode === option
+                        ? "rounded-none bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+                        : "rounded-none text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    {option === "DUEL" ? "1v1" : "Ranked"}
+                  </Button>
+                ))}
+              </div>
+              <div
+                role="tablist"
+                aria-label="Duel difficulty"
+                className="grid grid-cols-2 overflow-hidden rounded-lg border border-border bg-card"
+              >
+                {(["EASY", "REAL"] as const).map((option) => (
+                  <Button
+                    key={option}
+                    type="button"
+                    role="tab"
+                    aria-selected={duelDifficulty === option}
+                    variant="ghost"
+                    onClick={() => setDuelDifficulty(option)}
+                    className={
+                      duelDifficulty === option
+                        ? "rounded-none bg-primary text-primary-foreground hover:bg-primary hover:text-primary-foreground"
+                        : "rounded-none text-muted-foreground hover:text-foreground"
+                    }
+                  >
+                    {option === "EASY" ? "Easy" : "Real"}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <dl className="mt-6 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-border sm:grid-cols-5">
+            {duelStatItems.map(([label, value], index) => (
               <div
                 key={label}
                 className={`bg-card px-4 py-5 text-center ${index === 4 ? "col-span-2 sm:col-span-1" : ""}`}

@@ -15,6 +15,16 @@ type ProfileRunDatabaseRow = {
   completedAt: Date | null;
 };
 
+type DuelOutcomeDatabaseRow = Pick<
+  DuelProfileStats,
+  "wins" | "losses" | "draws"
+>;
+
+type DuelRoundStatsDatabaseRow = Pick<
+  DuelProfileStats,
+  "perfectRounds" | "zeroRounds"
+>;
+
 export type ProfileTopRun = {
   gameId: string;
   score: number;
@@ -29,6 +39,21 @@ export type SingleProfileStats = {
   zeroRounds: number;
   topRuns: ProfileTopRun[];
 };
+
+export type DuelProfileMode = "DUEL" | "RANKED";
+
+export type DuelProfileStats = {
+  wins: number;
+  losses: number;
+  draws: number;
+  perfectRounds: number;
+  zeroRounds: number;
+};
+
+export type DuelProfileStatsByDifficulty = Record<
+  GameDifficulty,
+  Record<DuelProfileMode, DuelProfileStats>
+>;
 
 export type ProfileStatsQuery = (
   text: string,
@@ -93,6 +118,61 @@ const SINGLE_PROFILE_TOP_RUNS_SQL = `
   LIMIT 3
 `;
 
+const DUEL_PROFILE_OUTCOMES_SQL = `
+  /* duel-profile:outcomes */
+  SELECT
+    (COUNT(*) FILTER (WHERE game_players.result = 'WIN'))::integer AS wins,
+    (COUNT(*) FILTER (WHERE game_players.result = 'LOSS'))::integer AS losses,
+    (COUNT(*) FILTER (WHERE game_players.result = 'DRAW'))::integer AS draws
+  FROM games
+  JOIN game_players ON game_players.game_id = games.id
+  WHERE game_players.user_id = $1
+    AND games.type = 'DUEL'
+    AND games.status = 'COMPLETED'
+    AND games.difficulty = $2
+    AND games.rated = $3
+    AND EXISTS (
+      SELECT 1
+      FROM game_players AS opponent
+      WHERE opponent.game_id = games.id
+        AND opponent.id <> game_players.id
+    )
+`;
+
+const DUEL_PROFILE_ROUND_STATS_SQL = `
+  /* duel-profile:round-stats */
+  WITH eligible_duels AS (
+    SELECT
+      games.id AS game_id,
+      game_players.id AS game_player_id
+    FROM games
+    JOIN game_players ON game_players.game_id = games.id
+    WHERE game_players.user_id = $1
+      AND games.type = 'DUEL'
+      AND games.status = 'COMPLETED'
+      AND games.difficulty = $2
+      AND games.rated = $3
+      AND EXISTS (
+        SELECT 1
+        FROM game_players AS opponent
+        WHERE opponent.game_id = games.id
+          AND opponent.id <> game_players.id
+      )
+  )
+  SELECT
+    (COUNT(round_results.id) FILTER (
+      WHERE round_results.score = 10000
+    ))::integer AS "perfectRounds",
+    (COUNT(round_results.id) FILTER (
+      WHERE round_results.score = 0
+    ))::integer AS "zeroRounds"
+  FROM eligible_duels
+  LEFT JOIN rounds ON rounds.game_id = eligible_duels.game_id
+  LEFT JOIN round_results
+    ON round_results.round_id = rounds.id
+    AND round_results.game_player_id = eligible_duels.game_player_id
+`;
+
 const runProfileStatsQuery: ProfileStatsQuery = async (text, values) => {
   const result = await databasePool().query<Record<string, unknown>>(text, [
     ...values,
@@ -128,5 +208,32 @@ export async function singleProfileStats(
         completedAt: run.completedAt?.toISOString() ?? null,
       };
     }),
+  };
+}
+
+export async function duelProfileStats(
+  userId: string,
+  difficulty: GameDifficulty,
+  mode: DuelProfileMode,
+  query: ProfileStatsQuery = runProfileStatsQuery,
+): Promise<DuelProfileStats> {
+  const values = [userId, difficulty, mode === "RANKED"] as const;
+  const [outcomesResult, roundStatsResult] = await Promise.all([
+    query(DUEL_PROFILE_OUTCOMES_SQL, values),
+    query(DUEL_PROFILE_ROUND_STATS_SQL, values),
+  ]);
+  const outcomes = outcomesResult.rows[0] as
+    | Partial<DuelOutcomeDatabaseRow>
+    | undefined;
+  const roundStats = roundStatsResult.rows[0] as
+    | Partial<DuelRoundStatsDatabaseRow>
+    | undefined;
+
+  return {
+    wins: outcomes?.wins ?? 0,
+    losses: outcomes?.losses ?? 0,
+    draws: outcomes?.draws ?? 0,
+    perfectRounds: roundStats?.perfectRounds ?? 0,
+    zeroRounds: roundStats?.zeroRounds ?? 0,
   };
 }

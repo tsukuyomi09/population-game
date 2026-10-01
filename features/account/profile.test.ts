@@ -5,6 +5,7 @@ import {
   type AccountDeletionTransaction,
 } from "./server/account-deletion";
 import {
+  duelProfileStats,
   singleProfileStats,
   type ProfileStatsQuery,
 } from "./server/profile-stats";
@@ -99,6 +100,157 @@ test("returns zero profile stats when no completed runs exist", async () => {
     zeroRounds: 0,
     topRuns: [],
   });
+});
+
+test("derives Duel stats independently by difficulty and player-facing mode", async () => {
+  const calls: Array<{ text: string; values: readonly unknown[] }> = [];
+  const query: ProfileStatsQuery = async (text, values) => {
+    calls.push({ text, values });
+
+    if (text.includes("duel-profile:outcomes")) {
+      return {
+        rows: [
+          {
+            wins: values[2] ? 4 : 2,
+            losses: 1,
+            draws: 3,
+          },
+        ],
+      };
+    }
+
+    return {
+      rows: [
+        {
+          perfectRounds: values[1] === "REAL" ? 5 : 6,
+          zeroRounds: 2,
+        },
+      ],
+    };
+  };
+
+  const normal = await duelProfileStats("user-1", "EASY", "DUEL", query);
+  const ranked = await duelProfileStats("user-1", "REAL", "RANKED", query);
+
+  assert.deepEqual(calls.map(({ values }) => values), [
+    ["user-1", "EASY", false],
+    ["user-1", "EASY", false],
+    ["user-1", "REAL", true],
+    ["user-1", "REAL", true],
+  ]);
+  assert.deepEqual(normal, {
+    wins: 2,
+    losses: 1,
+    draws: 3,
+    perfectRounds: 6,
+    zeroRounds: 2,
+  });
+  assert.deepEqual(ranked, {
+    wins: 4,
+    losses: 1,
+    draws: 3,
+    perfectRounds: 5,
+    zeroRounds: 2,
+  });
+
+  for (const call of calls) {
+    const sql = normalizedSql(call.text);
+    assert.match(sql, /games\.type = 'DUEL'/);
+    assert.match(sql, /games\.status = 'COMPLETED'/);
+    assert.match(sql, /games\.difficulty = \$2/);
+    assert.match(sql, /games\.rated = \$3/);
+    assert.match(sql, /EXISTS \( SELECT 1 FROM game_players AS opponent/);
+    assert.match(sql, /opponent\.game_id = games\.id/);
+    assert.match(sql, /opponent\.id <> game_players\.id/);
+    assert.doesNotMatch(sql, /COUNT\(\*\).*participants/);
+  }
+
+  const outcomeSql = calls
+    .filter(({ text }) => text.includes("duel-profile:outcomes"))
+    .map(({ text }) => normalizedSql(text));
+  assert.equal(outcomeSql.length, 2);
+  for (const sql of outcomeSql) {
+    assert.doesNotMatch(sql, /JOIN rounds/);
+    assert.doesNotMatch(sql, /round_results/);
+  }
+
+  const roundStatsSql = calls
+    .filter(({ text }) => text.includes("duel-profile:round-stats"))
+    .map(({ text }) => normalizedSql(text));
+  assert.equal(roundStatsSql.length, 2);
+  for (const sql of roundStatsSql) {
+    assert.match(sql, /LEFT JOIN rounds/);
+    assert.match(sql, /LEFT JOIN round_results/);
+    assert.match(sql, /round_results\.game_player_id = eligible_duels\.game_player_id/);
+    assert.match(sql, /round_results\.score = 10000/);
+    assert.match(sql, /round_results\.score = 0/);
+  }
+});
+
+test("counts a Ranked abandon with no resolved rounds in Duel outcomes", async () => {
+  const outcomeQueries: string[] = [];
+  const queryFor = (expectedUserId: string): ProfileStatsQuery =>
+    async (text, values) => {
+      assert.deepEqual(values, [expectedUserId, "EASY", true]);
+
+      if (text.includes("duel-profile:outcomes")) {
+        outcomeQueries.push(normalizedSql(text));
+        return {
+          rows: [
+            expectedUserId === "winner"
+              ? { wins: 2, losses: 0, draws: 0 }
+              : { wins: 0, losses: 2, draws: 0 },
+          ],
+        };
+      }
+
+      assert.match(normalizedSql(text), /LEFT JOIN round_results/);
+      return { rows: [{ perfectRounds: 1, zeroRounds: 0 }] };
+    };
+
+  const winner = await duelProfileStats(
+    "winner",
+    "EASY",
+    "RANKED",
+    queryFor("winner"),
+  );
+  const loser = await duelProfileStats(
+    "loser",
+    "EASY",
+    "RANKED",
+    queryFor("loser"),
+  );
+
+  assert.equal(winner.wins, 2);
+  assert.equal(winner.losses, 0);
+  assert.equal(loser.wins, 0);
+  assert.equal(loser.losses, 2);
+  assert.equal(winner.perfectRounds, 1);
+  assert.equal(loser.perfectRounds, 1);
+  assert.equal(outcomeQueries.length, 2);
+  for (const sql of outcomeQueries) {
+    assert.match(sql, /COUNT\(\*\) FILTER \(WHERE game_players\.result = 'WIN'\)/);
+    assert.match(sql, /games\.status = 'COMPLETED'/);
+    assert.match(sql, /games\.rated = \$3/);
+    assert.match(sql, /EXISTS \( SELECT 1 FROM game_players AS opponent/);
+    assert.doesNotMatch(sql, /JOIN rounds/);
+    assert.doesNotMatch(sql, /round_results/);
+  }
+});
+
+test("returns zero Duel stats when the player has no persistent Duels", async () => {
+  const query: ProfileStatsQuery = async () => ({ rows: [] });
+
+  assert.deepEqual(
+    await duelProfileStats("user-1", "EASY", "RANKED", query),
+    {
+      wins: 0,
+      losses: 0,
+      draws: 0,
+      perfectRounds: 0,
+      zeroRounds: 0,
+    },
+  );
 });
 
 test("deletes user-owned data and orphaned Single games transactionally", async () => {

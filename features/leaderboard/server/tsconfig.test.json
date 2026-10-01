@@ -11,6 +11,8 @@
     "outDir": "../../../artifacts/leaderboard/tests"
   },
   "files": [
+    "ranked-leaderboard.test.ts",
+    "ranked-leaderboard.ts",
     "single-leaderboard.test.ts",
     "single-leaderboard.ts",
     "../../database/server/client.ts",

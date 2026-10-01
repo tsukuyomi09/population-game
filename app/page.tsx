@@ -5,6 +5,7 @@ import {
   CircleUserRound,
   Globe2,
   LogIn,
+  ShieldCheck,
   Trophy,
 } from "lucide-react";
 import { auth, signIn } from "../auth";
@@ -13,18 +14,27 @@ import { Button } from "@/components/ui/button";
 import { avatarDefinition } from "@/features/account/avatars";
 import type { GameDifficulty } from "@/features/game/single-player";
 import {
+  rankedLeaderboard,
+  type RankedLeaderboardEntry,
+} from "@/features/leaderboard/server/ranked-leaderboard";
+import {
   singleLeaderboard,
   type SingleLeaderboardEntry,
 } from "@/features/leaderboard/server/single-leaderboard";
 
-type LeaderboardResult = {
+type SingleLeaderboardResult = {
   entries: SingleLeaderboardEntry[];
   unavailable: boolean;
 };
 
-async function loadLeaderboard(
+type RankedLeaderboardResult = {
+  entries: RankedLeaderboardEntry[];
+  unavailable: boolean;
+};
+
+async function loadSingleLeaderboard(
   difficulty: GameDifficulty,
-): Promise<LeaderboardResult> {
+): Promise<SingleLeaderboardResult> {
   try {
     return {
       entries: await singleLeaderboard(difficulty),
@@ -32,6 +42,20 @@ async function loadLeaderboard(
     };
   } catch (error) {
     console.error(`${difficulty} leaderboard failed to load:`, error);
+    return { entries: [], unavailable: true };
+  }
+}
+
+async function loadRankedLeaderboard(
+  difficulty: GameDifficulty,
+): Promise<RankedLeaderboardResult> {
+  try {
+    return {
+      entries: await rankedLeaderboard(difficulty),
+      unavailable: false,
+    };
+  } catch (error) {
+    console.error(`${difficulty} Ranked leaderboard failed to load:`, error);
     return { entries: [], unavailable: true };
   }
 }
@@ -170,12 +194,12 @@ function AccountAction({
   );
 }
 
-function Leaderboard({
+function SingleLeaderboard({
   difficulty,
   result,
 }: {
   difficulty: GameDifficulty;
-  result: LeaderboardResult;
+  result: SingleLeaderboardResult;
 }) {
   const isEasy = difficulty === "EASY";
 
@@ -278,11 +302,121 @@ function Leaderboard({
   );
 }
 
+function RankedLeaderboard({
+  difficulty,
+  result,
+}: {
+  difficulty: GameDifficulty;
+  result: RankedLeaderboardResult;
+}) {
+  const isEasy = difficulty === "EASY";
+
+  return (
+    <section
+      className="overflow-hidden rounded-2xl border border-border bg-card/80"
+      aria-labelledby={`${difficulty.toLowerCase()}-ranked-leaderboard-title`}
+    >
+      <div className="flex items-end justify-between gap-4 border-b border-border px-5 py-5 sm:px-6">
+        <div>
+          <p className="mb-1 text-[0.68rem] font-bold tracking-[0.2em] text-muted-foreground uppercase">
+            Ranked
+          </p>
+          <h2
+            id={`${difficulty.toLowerCase()}-ranked-leaderboard-title`}
+            className="text-2xl font-black tracking-tight"
+          >
+            {isEasy ? "Easy" : "Real"} Top 10
+          </h2>
+        </div>
+        <ShieldCheck
+          className={isEasy ? "size-6 text-primary" : "size-6 text-sky-300"}
+          aria-hidden="true"
+        />
+      </div>
+
+      {result.unavailable ? (
+        <p className="px-6 py-12 text-center text-sm text-muted-foreground">
+          The standings are taking a quick breather. Try again soon.
+        </p>
+      ) : result.entries.length === 0 ? (
+        <p className="px-6 py-12 text-center text-sm text-muted-foreground">
+          No rated players yet. The first ranking is yours to claim.
+        </p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[24rem] border-collapse text-left">
+            <thead>
+              <tr className="text-[0.65rem] tracking-[0.16em] text-muted-foreground uppercase">
+                <th scope="col" className="w-14 px-5 py-3 font-bold sm:px-6">
+                  Rank
+                </th>
+                <th scope="col" className="px-3 py-3 font-bold">
+                  Player
+                </th>
+                <th scope="col" className="px-5 py-3 text-right font-bold sm:px-6">
+                  Rating
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.entries.map((entry) => {
+                const avatar = avatarDefinition(entry.avatarId);
+
+                return (
+                  <tr
+                    key={entry.username}
+                    className="border-t border-border/70 transition-colors hover:bg-white/[0.025]"
+                  >
+                    <td className="px-5 py-3.5 font-mono text-sm font-black text-muted-foreground sm:px-6">
+                      {String(entry.rank).padStart(2, "0")}
+                    </td>
+                    <td className="px-3 py-3.5">
+                      <div className="flex items-center gap-3">
+                        {avatar ? (
+                          <Image
+                            src={avatar.src}
+                            alt=""
+                            width={36}
+                            height={36}
+                            className="size-9 rounded-full border border-border bg-secondary object-cover"
+                          />
+                        ) : (
+                          <span className="grid size-9 place-items-center rounded-full border border-border bg-secondary font-bold">
+                            {entry.username.slice(0, 1).toUpperCase()}
+                          </span>
+                        )}
+                        <span className="max-w-40 truncate text-sm font-bold">
+                          {entry.username}
+                        </span>
+                      </div>
+                    </td>
+                    <td className="px-5 py-3.5 text-right font-mono text-sm font-black sm:px-6">
+                      {entry.rating.toLocaleString("en-US")}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default async function Home() {
-  const [session, easyLeaderboard, realLeaderboard] = await Promise.all([
+  const [
+    session,
+    easyLeaderboard,
+    realLeaderboard,
+    easyRankedLeaderboard,
+    realRankedLeaderboard,
+  ] = await Promise.all([
     auth(),
-    loadLeaderboard("EASY"),
-    loadLeaderboard("REAL"),
+    loadSingleLeaderboard("EASY"),
+    loadSingleLeaderboard("REAL"),
+    loadRankedLeaderboard("EASY"),
+    loadRankedLeaderboard("REAL"),
   ]);
   const isGoogleAuthenticated = Boolean(session?.googleSub);
   const isRegistered = Boolean(session?.worldrawingUserId);
@@ -344,8 +478,33 @@ export default async function Home() {
             </div>
 
             <div className="grid gap-6 xl:grid-cols-2">
-              <Leaderboard difficulty="EASY" result={easyLeaderboard} />
-              <Leaderboard difficulty="REAL" result={realLeaderboard} />
+              <SingleLeaderboard difficulty="EASY" result={easyLeaderboard} />
+              <SingleLeaderboard difficulty="REAL" result={realLeaderboard} />
+            </div>
+
+            <div className="mt-12 mb-8 flex items-end justify-between gap-5">
+              <div>
+                <p className="text-xs font-bold tracking-[0.2em] text-primary uppercase">
+                  Competitive ratings
+                </p>
+                <h2 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">
+                  Top Ranked players
+                </h2>
+              </div>
+              <span className="hidden font-mono text-xs text-muted-foreground sm:block">
+                CURRENT RATING
+              </span>
+            </div>
+
+            <div className="grid gap-6 xl:grid-cols-2">
+              <RankedLeaderboard
+                difficulty="EASY"
+                result={easyRankedLeaderboard}
+              />
+              <RankedLeaderboard
+                difficulty="REAL"
+                result={realRankedLeaderboard}
+              />
             </div>
           </div>
         </section>
