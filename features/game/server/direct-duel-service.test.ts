@@ -59,6 +59,10 @@ class FakeRuntime {
     timer.cancelled = true;
     timer.callback();
   }
+
+  activeTimerCount() {
+    return this.timers.filter((timer) => !timer.cancelled).length;
+  }
 }
 
 function service(runtime: FakeRuntime) {
@@ -392,6 +396,163 @@ test("ready actions wait for both players and reject stale rounds", async () => 
   const staleAnimation = duels.completeResultAnimation(duelId, first, 1);
   assert.equal(staleAnimation.status, "STALE");
   assert.equal(staleAnimation.resultWaitStarted, false);
+});
+
+test("active-round abandon sends one terminal LOSS/WIN result", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const firstEvents: DirectDuelEvent[] = [];
+  const secondEvents: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => firstEvents.push(event));
+  duels.join(second, duelId);
+  duels.subscribe(duelId, second, (event) => secondEvents.push(event));
+
+  const abandoned = duels.abandon(duelId, first);
+  const eventCount = firstEvents.length + secondEvents.length;
+  const duplicate = duels.abandon(duelId, first);
+  const firstCompletion = firstEvents.find(
+    (event) => event.type === "game_completed",
+  );
+  const secondCompletion = secondEvents.find(
+    (event) => event.type === "game_completed",
+  );
+  const opponentAbandoned = secondEvents.find(
+    (event) => event.type === "opponent_abandoned",
+  );
+
+  assert.equal(abandoned.status, "APPLIED");
+  assert.equal(duplicate.status, "DUPLICATE");
+  assert.equal(firstEvents.length + secondEvents.length, eventCount);
+  assert.equal(firstCompletion?.outcome, "LOSS");
+  assert.equal(secondCompletion?.outcome, "WIN");
+  assert.equal(firstCompletion?.completionReason, "ABANDON");
+  assert.equal(secondCompletion?.completionReason, "ABANDON");
+  assert.equal(
+    opponentAbandoned?.abandonedRuntimePlayerId,
+    first.runtimePlayerId,
+  );
+  assert.equal(firstCompletion?.totalScore, 0);
+  assert.equal(secondCompletion?.totalScore, 0);
+  assert.equal(runtime.activeTimerCount(), 0);
+
+  await assert.rejects(
+    () =>
+      duels.submit(
+        duelId,
+        second,
+        1,
+        "MANUAL",
+        [shape(1_000)],
+        population,
+      ),
+    /round is not active/,
+  );
+  assert.throws(
+    () => duels.readyForNextRound(duelId, second, 1),
+    /result phase is not active/,
+  );
+  assert.equal(
+    duels.completeResultAnimation(duelId, second, 1).status,
+    "STALE",
+  );
+  assert.equal(
+    firstEvents.filter((event) => event.type === "round_started").length,
+    1,
+  );
+});
+
+test("abandon during result animation is terminal without starting result wait", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  duels.subscribe(duelId, second, () => undefined);
+  runtime.moveTo("2026-01-01T00:00:01.000Z");
+  await duels.submit(
+    duelId,
+    first,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  await duels.submit(
+    duelId,
+    second,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+
+  const abandoned = duels.abandon(duelId, first);
+
+  assert.equal(abandoned.status, "APPLIED");
+  assert.equal(
+    events.filter((event) => event.type === "result_phase_started").length,
+    0,
+  );
+  assert.equal(
+    duels.completeResultAnimation(duelId, second, 1).status,
+    "STALE",
+  );
+  assert.equal(runtime.activeTimerCount(), 0);
+  assert.equal(
+    events.filter((event) => event.type === "round_started").length,
+    1,
+  );
+});
+
+test("abandon during result waiting cancels auto-advance", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  duels.subscribe(duelId, second, () => undefined);
+  runtime.moveTo("2026-01-01T00:00:01.000Z");
+  await duels.submit(
+    duelId,
+    first,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  await duels.submit(
+    duelId,
+    second,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  duels.completeResultAnimation(duelId, first, 1);
+  duels.completeResultAnimation(duelId, second, 1);
+  assert.equal(runtime.activeTimerCount(), 1);
+
+  const abandoned = duels.abandon(duelId, second);
+
+  assert.equal(abandoned.status, "APPLIED");
+  assert.equal(runtime.activeTimerCount(), 0);
+  assert.throws(
+    () => duels.readyForNextRound(duelId, first, 1),
+    /result phase is not active/,
+  );
+  assert.equal(
+    events.filter((event) => event.type === "round_started").length,
+    1,
+  );
 });
 
 test("equal five-round totals deliver DRAW to both clients", async () => {

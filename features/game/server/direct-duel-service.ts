@@ -23,6 +23,7 @@ export type DirectDuelRound = {
 };
 
 export type DirectDuelOutcome = "WIN" | "LOSS" | "DRAW";
+export type DirectDuelCompletionReason = "ROUNDS_COMPLETE" | "ABANDON";
 
 export type DirectDuelResultPhase = {
   roundNumber: number;
@@ -45,6 +46,7 @@ export type DirectDuelEvent = {
     | "round_resolved"
     | "result_phase_started"
     | "player_ready"
+    | "opponent_abandoned"
     | "game_completed";
   player?: RuntimePlayerSummary;
   players?: RuntimePlayerSummary[];
@@ -58,6 +60,8 @@ export type DirectDuelEvent = {
   results?: RuntimeRoundResolution[];
   totals?: Record<string, number>;
   outcome?: DirectDuelOutcome;
+  completionReason?: DirectDuelCompletionReason;
+  abandonedRuntimePlayerId?: string;
   totalScore?: number;
   opponentTotalScore?: number;
 };
@@ -379,6 +383,40 @@ export class DirectDuelService {
     return completion;
   }
 
+  abandon(duelId: string, player: RuntimePlayer) {
+    const session = this.session(duelId);
+    this.sessionPlayer(session, player);
+    const game = session.game;
+    if (!game) throw new DirectDuelError("The Duel has not started.", 409);
+
+    let abandonment;
+    try {
+      abandonment = game.abandon(player, this.options.now());
+    } catch (error) {
+      if (error instanceof RuntimeGameTransitionError) {
+        throw new DirectDuelError(error.message, 409);
+      }
+      throw error;
+    }
+
+    if (abandonment.status === "APPLIED" && abandonment.abandonment) {
+      session.cancelRoundTimer?.();
+      session.cancelRoundTimer = undefined;
+      session.cancelResultTimer?.();
+      session.cancelResultTimer = undefined;
+
+      this.sendToOpponent(session, player.runtimePlayerId, {
+        type: "opponent_abandoned",
+        completionReason: "ABANDON",
+        abandonedRuntimePlayerId:
+          abandonment.abandonment.abandonedRuntimePlayerId,
+      });
+      this.sendCompletion(session, game.snapshot());
+    }
+
+    return abandonment;
+  }
+
   readyForNextRound(
     duelId: string,
     player: RuntimePlayer,
@@ -483,6 +521,7 @@ export class DirectDuelService {
   ) {
     const game = session.game;
     if (!game) return;
+    if (game.snapshot().state === "COMPLETE") return;
 
     for (const player of session.players) {
       if (!session.listeners.get(player.runtimePlayerId)?.size) continue;
@@ -510,17 +549,36 @@ export class DirectDuelService {
     const [first, second] = session.players;
     const firstTotal = snapshot.totals[first.runtimePlayerId] ?? 0;
     const secondTotal = snapshot.totals[second.runtimePlayerId] ?? 0;
+    const completionReason = snapshot.abandonment
+      ? "ABANDON"
+      : "ROUNDS_COMPLETE";
+    const firstOutcome = snapshot.abandonment
+      ? snapshot.abandonment.abandonedRuntimePlayerId === first.runtimePlayerId
+        ? "LOSS"
+        : "WIN"
+      : outcome(firstTotal, secondTotal);
+    const secondOutcome = snapshot.abandonment
+      ? snapshot.abandonment.abandonedRuntimePlayerId === second.runtimePlayerId
+        ? "LOSS"
+        : "WIN"
+      : outcome(secondTotal, firstTotal);
 
     this.sendToPlayer(session, first.runtimePlayerId, {
       type: "game_completed",
-      outcome: outcome(firstTotal, secondTotal),
+      outcome: firstOutcome,
+      completionReason,
+      abandonedRuntimePlayerId:
+        snapshot.abandonment?.abandonedRuntimePlayerId,
       totalScore: firstTotal,
       opponentTotalScore: secondTotal,
       totals: snapshot.totals,
     });
     this.sendToPlayer(session, second.runtimePlayerId, {
       type: "game_completed",
-      outcome: outcome(secondTotal, firstTotal),
+      outcome: secondOutcome,
+      completionReason,
+      abandonedRuntimePlayerId:
+        snapshot.abandonment?.abandonedRuntimePlayerId,
       totalScore: secondTotal,
       opponentTotalScore: firstTotal,
       totals: snapshot.totals,

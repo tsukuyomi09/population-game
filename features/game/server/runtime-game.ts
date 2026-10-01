@@ -50,8 +50,15 @@ export type RuntimeGameSnapshot = {
   rounds: RuntimeRoundSnapshot[];
   currentRound?: RuntimeRoundSnapshot;
   resultPhase?: RuntimeResultPhaseSnapshot;
+  abandonment?: RuntimeAbandonmentSnapshot;
   totals: Record<string, number>;
   completedAt?: Date;
+};
+
+export type RuntimeAbandonmentSnapshot = {
+  abandonedRuntimePlayerId: string;
+  winnerRuntimePlayerId: string;
+  abandonedAt: Date;
 };
 
 export type RuntimeResultPhaseSnapshot = {
@@ -93,6 +100,11 @@ export type RuntimeAnimationCompleteOutcome = {
   resultPhase?: RuntimeResultPhaseSnapshot;
 };
 
+export type RuntimeAbandonOutcome = {
+  status: "APPLIED" | "DUPLICATE" | "STALE";
+  abandonment?: RuntimeAbandonmentSnapshot;
+};
+
 export type RuntimeTimeoutSubmissionRequest = {
   runtimeGameId: string;
   runtimePlayerId: string;
@@ -123,6 +135,12 @@ type RuntimeResultPhaseState = {
   readyRuntimePlayerIds: Set<string>;
   startedAt?: Date;
   endsAt?: Date;
+};
+
+type RuntimeAbandonmentState = {
+  abandonedRuntimePlayerId: string;
+  winnerRuntimePlayerId: string;
+  abandonedAt: Date;
 };
 
 type RuntimeGameOptions = {
@@ -172,6 +190,7 @@ export class RuntimeGame {
   private readonly rounds: RuntimeRoundState[] = [];
   private readonly totals = new Map<string, number>();
   private resultPhase?: RuntimeResultPhaseState;
+  private abandonment?: RuntimeAbandonmentState;
   private completedAt?: Date;
 
   constructor(private readonly options: RuntimeGameOptions) {
@@ -423,6 +442,53 @@ export class RuntimeGame {
     };
   }
 
+  abandon(player: RuntimePlayer, abandonedAt: Date): RuntimeAbandonOutcome {
+    if (this.options.type !== "DUEL") {
+      throw new RuntimeGameTransitionError("Only a Duel can be abandoned here.");
+    }
+    if (!validDate(abandonedAt)) {
+      throw new RuntimeGameTransitionError("Abandon time is invalid.");
+    }
+    const abandoningPlayer = this.gamePlayer(player);
+
+    if (this.lifecycle === "COMPLETE") {
+      return this.abandonment
+        ? {
+            status: "DUPLICATE",
+            abandonment: this.abandonmentSnapshot(this.abandonment),
+          }
+        : { status: "STALE" };
+    }
+    if (
+      this.lifecycle !== "ROUND_ACTIVE" &&
+      this.lifecycle !== "ROUND_RESULT"
+    ) {
+      throw new RuntimeGameTransitionError("The Duel has not started.");
+    }
+
+    const winner = this.options.players.find(
+      (candidate) =>
+        candidate.runtimePlayerId !== abandoningPlayer.runtimePlayerId,
+    );
+    if (!winner) {
+      throw new RuntimeGameTransitionError("The Duel opponent was not found.");
+    }
+
+    this.abandonment = {
+      abandonedRuntimePlayerId: abandoningPlayer.runtimePlayerId,
+      winnerRuntimePlayerId: winner.runtimePlayerId,
+      abandonedAt: new Date(abandonedAt),
+    };
+    this.lifecycle = "COMPLETE";
+    this.completedAt = new Date(abandonedAt);
+    this.resultPhase = undefined;
+
+    return {
+      status: "APPLIED",
+      abandonment: this.abandonmentSnapshot(this.abandonment),
+    };
+  }
+
   readyForNextRound(
     player: RuntimePlayer,
     roundNumber: number,
@@ -503,6 +569,9 @@ export class RuntimeGame {
       resultPhase: this.resultPhase
         ? this.resultPhaseSnapshot(this.resultPhase)
         : undefined,
+      abandonment: this.abandonment
+        ? this.abandonmentSnapshot(this.abandonment)
+        : undefined,
       totals: Object.fromEntries(this.totals),
       completedAt: this.completedAt ? new Date(this.completedAt) : undefined,
     };
@@ -573,6 +642,16 @@ export class RuntimeGame {
     return { round, playerState };
   }
 
+  private gamePlayer(player: RuntimePlayer) {
+    const participant = this.options.players.find((candidate) =>
+      samePlayer(candidate, player),
+    );
+    if (!participant) {
+      throw new RuntimeGameTransitionError("Player not found.");
+    }
+    return participant;
+  }
+
   private activePlayerRound(player: RuntimePlayer, roundNumber: number) {
     const { round, playerState } = this.playerRound(player, roundNumber);
     if (
@@ -618,6 +697,16 @@ export class RuntimeGame {
         ? new Date(resultPhase.startedAt)
         : undefined,
       endsAt: resultPhase.endsAt ? new Date(resultPhase.endsAt) : undefined,
+    };
+  }
+
+  private abandonmentSnapshot(
+    abandonment: RuntimeAbandonmentState,
+  ): RuntimeAbandonmentSnapshot {
+    return {
+      abandonedRuntimePlayerId: abandonment.abandonedRuntimePlayerId,
+      winnerRuntimePlayerId: abandonment.winnerRuntimePlayerId,
+      abandonedAt: new Date(abandonment.abandonedAt),
     };
   }
 }

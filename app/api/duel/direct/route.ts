@@ -120,6 +120,12 @@ export async function POST(request: Request) {
       );
     }
 
+    if (body.action === "ABANDON") {
+      return Response.json(
+        directDuels().abandon(duelId(body.duelId), player),
+      );
+    }
+
     throw new DirectDuelError("Unknown Direct Duel action.", 400);
   } catch (error) {
     return errorResponse(error);

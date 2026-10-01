@@ -93,3 +93,10 @@ export async function requestDirectDuelResultAnimationComplete(
     roundNumber,
   });
 }
+
+export async function requestDirectDuelAbandon(duelId: string) {
+  return postDirectDuelAction({
+    action: "ABANDON",
+    duelId,
+  });
+}

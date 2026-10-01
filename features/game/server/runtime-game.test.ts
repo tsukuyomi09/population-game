@@ -492,3 +492,136 @@ test("final Duel round finalizes without a result phase or round six", () => {
   assert.equal(snapshot.resultPhase, undefined);
   assert.equal(snapshot.currentRound, undefined);
 });
+
+test("abandon during an active round is terminal and idempotent", () => {
+  const first = guest("guest-1");
+  const second = guest("guest-2");
+  const { game, targetsGenerated } = runtimeGame([first, second], "DUEL");
+  const abandonedAt = new Date(startedAt.getTime() + 1_000);
+
+  const applied = game.abandon(first, abandonedAt);
+  const snapshotAfterAbandon = game.snapshot();
+  const duplicate = game.abandon(first, abandonedAt);
+
+  assert.equal(applied.status, "APPLIED");
+  assert.equal(duplicate.status, "DUPLICATE");
+  assert.equal(snapshotAfterAbandon.state, "COMPLETE");
+  assert.equal(
+    snapshotAfterAbandon.abandonment?.abandonedRuntimePlayerId,
+    first.runtimePlayerId,
+  );
+  assert.equal(
+    snapshotAfterAbandon.abandonment?.winnerRuntimePlayerId,
+    second.runtimePlayerId,
+  );
+  assert.equal(snapshotAfterAbandon.rounds.length, 1);
+  assert.equal(snapshotAfterAbandon.rounds[0]?.state, "ACTIVE");
+  assert.equal(
+    snapshotAfterAbandon.rounds[0]?.players.some(
+      (state) => state.resolution !== undefined,
+    ),
+    false,
+  );
+  assert.equal(snapshotAfterAbandon.currentRound, undefined);
+  assert.equal(snapshotAfterAbandon.resultPhase, undefined);
+  assert.equal(targetsGenerated(), 1);
+  assert.deepEqual(game.snapshot(), snapshotAfterAbandon);
+});
+
+test("abandon during result animation preserves the resolved round", () => {
+  const first = guest("guest-1");
+  const second = guest("guest-2");
+  const { game } = runtimeGame([first, second], "DUEL");
+  resolveDuelRound(
+    game,
+    first,
+    second,
+    1,
+    new Date(startedAt.getTime() + 1_000),
+  );
+
+  const applied = game.abandon(first, new Date(startedAt.getTime() + 5_000));
+  const snapshot = game.snapshot();
+
+  assert.equal(applied.status, "APPLIED");
+  assert.equal(snapshot.state, "COMPLETE");
+  assert.equal(snapshot.resultPhase, undefined);
+  assert.equal(snapshot.rounds.length, 1);
+  assert.equal(snapshot.rounds[0]?.state, "RESOLVED");
+  assert.equal(
+    snapshot.rounds[0]?.players.filter((state) => state.resolution).length,
+    2,
+  );
+});
+
+test("abandon during result waiting prevents timer and ready advancement", () => {
+  const first = guest("guest-1");
+  const second = guest("guest-2");
+  const { game, targetsGenerated } = runtimeGame([first, second], "DUEL");
+  resolveDuelRound(
+    game,
+    first,
+    second,
+    1,
+    new Date(startedAt.getTime() + 1_000),
+  );
+  completeDuelResultAnimations(
+    game,
+    first,
+    second,
+    1,
+    new Date(startedAt.getTime() + 4_000),
+    new Date(startedAt.getTime() + 5_000),
+  );
+  const resultDeadline = game.snapshot().resultPhase?.endsAt;
+  assert.ok(resultDeadline);
+  game.readyForNextRound(first, 1, new Date(startedAt.getTime() + 6_000));
+
+  game.abandon(second, new Date(startedAt.getTime() + 7_000));
+  const timedAdvance = game.advanceResultPhase(1, resultDeadline);
+
+  assert.equal(timedAdvance.status, "STALE");
+  assert.throws(
+    () =>
+      game.readyForNextRound(
+        second,
+        1,
+        new Date(startedAt.getTime() + 7_001),
+      ),
+    /result phase is not active/,
+  );
+  assert.equal(game.snapshot().rounds.length, 1);
+  assert.equal(targetsGenerated(), 1);
+});
+
+test("terminal abandon rejects stale mutations without fabricating future rounds", () => {
+  const first = guest("guest-1");
+  const second = guest("guest-2");
+  const { game, targetsGenerated } = runtimeGame([first, second], "DUEL");
+  const abandonedAt = new Date(startedAt.getTime() + 1_000);
+  game.abandon(first, abandonedAt);
+  const terminalSnapshot = game.snapshot();
+
+  assert.throws(
+    () =>
+      game.resolvePlayer({
+        player: second,
+        roundNumber: 1,
+        submissionType: "MANUAL",
+        calculatedPopulation: 1_000,
+        resolvedAt: new Date(abandonedAt.getTime() + 1),
+      }),
+    /round is not active/,
+  );
+  assert.throws(
+    () => game.readyForNextRound(second, 1, abandonedAt),
+    /result phase is not active/,
+  );
+  assert.equal(
+    game.completeResultAnimation(second, 1, abandonedAt).status,
+    "STALE",
+  );
+  assert.deepEqual(game.snapshot(), terminalSnapshot);
+  assert.equal(game.snapshot().rounds.length, 1);
+  assert.equal(targetsGenerated(), 1);
+});

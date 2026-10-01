@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
+  requestDirectDuelAbandon,
   requestDirectDuelReady,
   requestDirectDuelResultAnimationComplete,
   requestDirectDuelSubmission,
@@ -398,6 +399,10 @@ export function WorldMap({
   const [duelReadyPlayerIds, setDuelReadyPlayerIds] = useState<string[]>([]);
   const [isDuelReadyPending, setIsDuelReadyPending] = useState(false);
   const [duelOutcome, setDuelOutcome] = useState<DirectDuelOutcome | null>(null);
+  const [duelAbandonRole, setDuelAbandonRole] = useState<
+    "SELF" | "OPPONENT" | null
+  >(null);
+  const [isDuelAbandonPending, setIsDuelAbandonPending] = useState(false);
   const [opponentTotalScore, setOpponentTotalScore] = useState(0);
   const [duelSubmitted, setDuelSubmitted] = useState(false);
   const [opponentSubmitted, setOpponentSubmitted] = useState(false);
@@ -478,6 +483,18 @@ export function WorldMap({
   useEffect(() => {
     runtimePlayerRef.current = runtimePlayer;
   }, [runtimePlayer]);
+
+  useEffect(() => {
+    if (
+      duelAbandonRole !== "SELF" ||
+      duelOutcome === null ||
+      runtimePlayer === null
+    ) {
+      return;
+    }
+
+    router.push(runtimePlayer.kind === "registered" ? "/profile" : "/");
+  }, [duelAbandonRole, duelOutcome, router, runtimePlayer]);
 
   useEffect(() => {
     if (!duelRound || duelOutcome) return;
@@ -564,6 +581,21 @@ export function WorldMap({
       router.push(destination);
     } catch (error) {
       console.error("Game abandon failed:", error);
+    }
+  };
+
+  const abandonDuel = async () => {
+    if (!duelId || isDuelAbandonPending) return;
+
+    setIsDuelAbandonPending(true);
+    setDuelError(null);
+    try {
+      await requestDirectDuelAbandon(duelId);
+    } catch (error) {
+      setDuelError(
+        error instanceof Error ? error.message : "Duel abandon failed.",
+      );
+      setIsDuelAbandonPending(false);
     }
   };
 
@@ -798,7 +830,23 @@ export function WorldMap({
         setDuelReadyPlayerIds(event.readyRuntimePlayerIds);
       }
 
+      if (event.type === "opponent_abandoned") {
+        setDuelAbandonRole("OPPONENT");
+      }
+
       if (event.type === "game_completed" && event.outcome) {
+        if (
+          event.completionReason === "ABANDON" &&
+          event.abandonedRuntimePlayerId
+        ) {
+          setDuelAbandonRole(
+            event.abandonedRuntimePlayerId ===
+              runtimePlayerRef.current?.runtimePlayerId
+              ? "SELF"
+              : "OPPONENT",
+          );
+        }
+        setIsDuelAbandonPending(false);
         setDuelOutcome(event.outcome);
         setTotalScore(event.totalScore ?? 0);
         setOpponentTotalScore(event.opponentTotalScore ?? 0);
@@ -1036,7 +1084,7 @@ export function WorldMap({
           <div className="p-5 sm:p-6">
             <div className="flex items-start justify-between gap-4">
               <h2 id="leave-dialog-title" className="text-2xl font-black">
-                Leave game?
+                {isDuel ? "Abandon Duel?" : "Leave game?"}
               </h2>
               <form method="dialog">
                 <Button
@@ -1050,18 +1098,29 @@ export function WorldMap({
               </form>
             </div>
             <p className="mt-3 leading-6 text-slate-300">
-              Your current game will end and won’t count as a completed run.
+              {isDuel
+                ? "Abandoning is immediate. You will lose and your opponent will win."
+                : "Your current game will end and won’t count as a completed run."}
             </p>
             <Button
               type="button"
               onClick={() => {
                 leaveDialogRef.current?.close();
-                void abandonGame();
+                if (isDuel) {
+                  void abandonDuel();
+                } else {
+                  void abandonGame();
+                }
               }}
+              disabled={isDuel && isDuelAbandonPending}
               variant="ghost"
               className="mt-6 w-full border border-rose-400/40 bg-slate-900 text-rose-200 hover:bg-rose-950/70 hover:text-rose-100"
             >
-              Leave
+              {isDuel
+                ? isDuelAbandonPending
+                  ? "Abandoning…"
+                  : "Abandon Duel"
+                : "Leave"}
             </Button>
           </div>
         </dialog>
@@ -1139,17 +1198,16 @@ export function WorldMap({
                   <CircleHelp aria-hidden="true" />
                   <span className="hidden sm:inline">Controls</span>
                 </Button>
-                {!isDuel && (
-                  <Button
-                    type="button"
-                    onClick={() => leaveDialogRef.current?.showModal()}
-                    variant="ghost"
-                    size="sm"
-                    className="border border-rose-400/35 bg-slate-950/90 text-xs text-rose-200 shadow-lg backdrop-blur-md hover:border-rose-300/60 hover:bg-rose-950/70 hover:text-rose-100"
-                  >
-                    Leave
-                  </Button>
-                )}
+                <Button
+                  type="button"
+                  onClick={() => leaveDialogRef.current?.showModal()}
+                  disabled={isDuel && isDuelAbandonPending}
+                  variant="ghost"
+                  size="sm"
+                  className="border border-rose-400/35 bg-slate-950/90 text-xs text-rose-200 shadow-lg backdrop-blur-md hover:border-rose-300/60 hover:bg-rose-950/70 hover:text-rose-100"
+                >
+                  {isDuel ? "Abandon" : "Leave"}
+                </Button>
               </div>
 
               <div className="fixed bottom-4 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-white/10 bg-background/90 p-2 pl-3 text-foreground shadow-2xl backdrop-blur-md">
@@ -1241,6 +1299,16 @@ export function WorldMap({
         {isDuel && duelRoundResult !== null && duelOutcome === null && (
           <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/45 p-4 text-foreground backdrop-blur-[2px] duration-300">
             <section className="animate-in zoom-in-95 relative my-auto w-full max-w-lg rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300">
+              <Button
+                type="button"
+                onClick={() => leaveDialogRef.current?.showModal()}
+                disabled={isDuelAbandonPending}
+                variant="ghost"
+                size="sm"
+                className="absolute top-3 right-3 text-xs text-rose-300 hover:bg-rose-950/60 hover:text-rose-100"
+              >
+                Abandon
+              </Button>
               {duelResultPhase && (
                 <div className="absolute top-4 left-4 flex w-14 flex-col items-center text-red-400">
                   <span
@@ -1386,15 +1454,25 @@ export function WorldMap({
           <div className="animate-in fade-in fixed inset-0 z-40 grid place-items-center overflow-y-auto bg-black/50 p-4 text-foreground backdrop-blur-[2px] duration-300">
             <section className="animate-in zoom-in-95 my-auto w-full max-w-xl rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300 sm:p-8">
               <p className="text-xs font-black tracking-[0.2em] text-primary uppercase">
-                1v1 · Duel complete
+                {duelAbandonRole === "OPPONENT"
+                  ? "1v1 · Opponent abandoned"
+                  : "1v1 · Duel complete"}
               </p>
               <h1 className="mt-3 text-5xl font-black tracking-tight">
-                {duelOutcome === "WIN"
-                  ? "Victory"
-                  : duelOutcome === "LOSS"
-                    ? "Defeat"
-                    : "Draw"}
+                {duelAbandonRole === "OPPONENT"
+                  ? "Opponent abandoned"
+                  : duelOutcome === "WIN"
+                    ? "Victory"
+                    : duelOutcome === "LOSS"
+                      ? "Defeat"
+                      : "Draw"}
               </h1>
+              {duelAbandonRole === "OPPONENT" && (
+                <p className="mt-3 text-sm text-muted-foreground">
+                  The Duel ended immediately. Your authoritative result is {" "}
+                  <span className="font-black text-primary">{duelOutcome}</span>.
+                </p>
+              )}
 
               <dl className="mt-7 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
                 <div className="bg-card px-4 py-5">
@@ -1419,20 +1497,34 @@ export function WorldMap({
                 <ScoreProgress scores={roundScores} />
               </div>
 
-              <div className="mt-7 grid gap-3 sm:grid-cols-2">
-                <Button asChild className="h-11 font-black">
-                  <Link href="/duel-test">
-                    <Swords aria-hidden="true" />
-                    New Duel
-                  </Link>
+              {duelAbandonRole === "OPPONENT" ? (
+                <Button
+                  type="button"
+                  onClick={() =>
+                    router.push(
+                      runtimePlayer?.kind === "registered" ? "/profile" : "/",
+                    )
+                  }
+                  className="mt-7 h-11 w-full font-black"
+                >
+                  Continue
                 </Button>
-                <Button asChild variant="outline" className="h-11 font-bold">
-                  <Link href="/">
-                    <ArrowLeft aria-hidden="true" />
-                    Back home
-                  </Link>
-                </Button>
-              </div>
+              ) : (
+                <div className="mt-7 grid gap-3 sm:grid-cols-2">
+                  <Button asChild className="h-11 font-black">
+                    <Link href="/duel-test">
+                      <Swords aria-hidden="true" />
+                      New Duel
+                    </Link>
+                  </Button>
+                  <Button asChild variant="outline" className="h-11 font-bold">
+                    <Link href="/">
+                      <ArrowLeft aria-hidden="true" />
+                      Back home
+                    </Link>
+                  </Button>
+                </div>
+              )}
             </section>
           </div>
         )}
