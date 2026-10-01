@@ -47,6 +47,25 @@ async function lockedSingleGame(
 export const singleGamePersistence: SingleGamePersistence = {
   async createGame(input) {
     return transaction(async (client) => {
+      await client.query(
+        `
+          UPDATE games
+          SET status = 'ABANDONED',
+              end_reason = 'PLAYER_ABANDON',
+              ended_at = $2
+          WHERE games.type = 'SINGLE'
+            AND games.status = 'ACTIVE'
+            AND games.started_at < $2 - INTERVAL '1 hour'
+            AND EXISTS (
+              SELECT 1
+              FROM game_players
+              WHERE game_players.game_id = games.id
+                AND game_players.user_id = $1
+            )
+        `,
+        [input.userId, input.startedAt],
+      );
+
       const game = await client.query<{ id: string }>(
         `
           INSERT INTO games (
