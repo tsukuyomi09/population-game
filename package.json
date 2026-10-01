@@ -17,6 +17,7 @@
     "test:account": "tsc --project features/account/tsconfig.test.json && node --test artifacts/account/tests/features/account/account.test.js",
     "test:profile": "tsc --project features/account/tsconfig.profile.test.json && node --test artifacts/account/profile-tests/features/account/profile.test.js",
     "test:game-identity": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/runtime-player.test.js",
+    "test:game-runtime": "tsc --project features/game/tsconfig.test.json && node --test artifacts/game/identity-tests/features/game/server/runtime-game.test.js",
     "test:single-persistence": "tsc --project features/game/server/tsconfig.test.json && node --test artifacts/game/single-persistence-tests/features/game/server/single-game-service.test.js",
     "test:single-leaderboard": "tsc --project features/leaderboard/server/tsconfig.test.json && node --test artifacts/leaderboard/tests/features/leaderboard/server/single-leaderboard.test.js",
     "test:population-adapter": "tsc --project features/population/server/tsconfig.test.json && node --test artifacts/population/adapter-tests/features/population/server/population-service-client.test.js"

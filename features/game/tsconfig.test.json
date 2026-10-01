@@ -10,5 +10,11 @@
     "rootDir": "../..",
     "outDir": "../../artifacts/game/identity-tests"
   },
-  "files": ["runtime-player.test.ts", "runtime-player.ts"]
+  "files": [
+    "server/runtime-game.test.ts",
+    "server/runtime-game.ts",
+    "runtime-player.test.ts",
+    "runtime-player.ts",
+    "single-player.ts"
+  ]
 }
