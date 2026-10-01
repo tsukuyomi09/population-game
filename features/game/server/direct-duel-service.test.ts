@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PopulationShape } from "../../population/types";
-import type { GuestRuntimePlayer } from "../runtime-player";
+import type {
+  GuestRuntimePlayer,
+  RegisteredRuntimePlayer,
+  RuntimePlayer,
+} from "../runtime-player";
 import {
   DirectDuelService,
   type DirectDuelEvent,
@@ -12,6 +16,16 @@ function guest(id: string): GuestRuntimePlayer {
     kind: "guest",
     runtimePlayerId: id,
     guestSessionId: `${id}-session`,
+  };
+}
+
+function registered(id: string): RegisteredRuntimePlayer {
+  return {
+    kind: "registered",
+    runtimePlayerId: id,
+    userId: `${id}-user`,
+    username: id,
+    avatarId: "cat",
   };
 }
 
@@ -68,7 +82,10 @@ class FakeRuntime {
 function service(runtime: FakeRuntime) {
   return new DirectDuelService({
     generateDuelId: () => "duel-1",
+    generateInviteToken: () => "invite-token-123456",
     generateTarget: () => 1_000,
+    inviteTtlMs: 600_000,
+    preGameDurationMs: 5_000,
     roundDurationMs: 120_000,
     finalWindowMs: 10_000,
     resultPhaseDurationMs: 10_000,
@@ -80,6 +97,178 @@ function service(runtime: FakeRuntime) {
 async function population(shapes: PopulationShape[]) {
   return Number(shapes[0]?.id ?? 0);
 }
+
+test("guest and registered creators make unrated short-lived invites", () => {
+  for (const creator of [guest("guest-creator"), registered("member-creator")]) {
+    const runtime = new FakeRuntime();
+    const created = service(runtime).createInvite(creator, "REAL");
+
+    assert.equal(created.status, "WAITING");
+    assert.equal(created.rated, false);
+    assert.equal(created.difficulty, "REAL");
+    assert.equal(created.inviteToken, "invite-token-123456");
+    assert.equal(
+      new Date(created.inviteExpiresAt).getTime() - runtime.now.getTime(),
+      600_000,
+    );
+  }
+});
+
+test("invite identity combinations join the same Duel and start once after countdown", async (t) => {
+  const combinations: Array<{
+    name: string;
+    creator: RuntimePlayer;
+    joiner: RuntimePlayer;
+  }> = [
+    {
+      name: "guest vs guest",
+      creator: guest("guest-a"),
+      joiner: guest("guest-b"),
+    },
+    {
+      name: "guest vs registered",
+      creator: guest("guest-a"),
+      joiner: registered("member-b"),
+    },
+    {
+      name: "registered vs guest",
+      creator: registered("member-a"),
+      joiner: guest("guest-b"),
+    },
+    {
+      name: "registered vs registered",
+      creator: registered("member-a"),
+      joiner: registered("member-b"),
+    },
+  ];
+
+  for (const combination of combinations) {
+    await t.test(combination.name, () => {
+      const runtime = new FakeRuntime();
+      const duels = service(runtime);
+      const creatorEvents: DirectDuelEvent[] = [];
+      const joinerEvents: DirectDuelEvent[] = [];
+      const created = duels.createInvite(combination.creator, "EASY");
+      duels.subscribe(created.duelId, combination.creator, (event) =>
+        creatorEvents.push(event),
+      );
+
+      assert.equal(
+        creatorEvents.filter((event) => event.type === "round_started").length,
+        0,
+      );
+      assert.equal(
+        creatorEvents.filter((event) => event.type === "pre_game_started")
+          .length,
+        0,
+      );
+
+      const joined = duels.joinInvite(
+        combination.joiner,
+        created.inviteToken,
+      );
+      assert.equal(joined.duelId, created.duelId);
+      assert.equal(joined.status, "COUNTDOWN");
+      assert.equal(joined.rated, false);
+      assert.equal(joined.players.length, 2);
+      assert.equal(
+        new Date(joined.preGame.endsAt).getTime() -
+          new Date(joined.preGame.startedAt).getTime(),
+        5_000,
+      );
+      assert.equal(
+        creatorEvents.filter((event) => event.type === "pre_game_started")
+          .length,
+        1,
+      );
+      assert.equal(
+        creatorEvents.filter((event) => event.type === "round_started").length,
+        0,
+      );
+
+      duels.subscribe(created.duelId, combination.joiner, (event) =>
+        joinerEvents.push(event),
+      );
+      assert.equal(
+        joinerEvents.filter((event) => event.type === "pre_game_started")
+          .length,
+        1,
+      );
+
+      const duplicate = duels.joinInvite(
+        combination.joiner,
+        created.inviteToken,
+      );
+      assert.equal(duplicate.status, "COUNTDOWN");
+      assert.equal(runtime.activeTimerCount(), 1);
+
+      runtime.fireNextTimerAt(joined.preGame.endsAt);
+      const rounds = creatorEvents.filter(
+        (event) => event.type === "round_started",
+      );
+      assert.equal(rounds.length, 1);
+      assert.equal(rounds[0]?.round?.roundNumber, 1);
+      assert.equal(
+        new Date(rounds[0]!.round!.endsAt).getTime() -
+          new Date(rounds[0]!.round!.startedAt).getTime(),
+        120_000,
+      );
+      assert.equal(
+        creatorEvents.find((event) => event.type === "game_started")?.rated,
+        false,
+      );
+
+      const staleDuplicate = duels.joinInvite(
+        combination.joiner,
+        created.inviteToken,
+      );
+      assert.equal(staleDuplicate.status, "ACTIVE");
+      assert.equal(
+        creatorEvents.filter((event) => event.type === "round_started").length,
+        1,
+      );
+      assert.equal(runtime.activeTimerCount(), 1);
+    });
+  }
+});
+
+test("invalid, expired, creator-used, and third-player invites fail safely", () => {
+  const invalidDuels = service(new FakeRuntime());
+  assert.throws(
+    () => invalidDuels.joinInvite(guest("joiner"), "missing-token"),
+    /not found/,
+  );
+
+  const expiredRuntime = new FakeRuntime();
+  const expiredDuels = service(expiredRuntime);
+  const expired = expiredDuels.createInvite(guest("creator"), "EASY");
+  expiredRuntime.moveTo(
+    new Date(expiredRuntime.now.getTime() + 600_000),
+  );
+  assert.throws(
+    () => expiredDuels.joinInvite(guest("joiner"), expired.inviteToken),
+    /expired/,
+  );
+
+  const usedRuntime = new FakeRuntime();
+  const usedDuels = service(usedRuntime);
+  const creator = guest("creator");
+  const used = usedDuels.createInvite(creator, "EASY");
+  assert.throws(
+    () => usedDuels.join(guest("bypass"), used.duelId),
+    /requires its invite link/,
+  );
+  assert.throws(
+    () => usedDuels.joinInvite(creator, used.inviteToken),
+    /second distinct player/,
+  );
+  usedDuels.joinInvite(guest("second"), used.inviteToken);
+  assert.throws(
+    () => usedDuels.joinInvite(registered("third"), used.inviteToken),
+    /already been used/,
+  );
+  assert.equal(usedRuntime.activeTimerCount(), 1);
+});
 
 test("direct Duel streams five authoritative rounds and one final result", async () => {
   const runtime = new FakeRuntime();

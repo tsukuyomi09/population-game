@@ -2,6 +2,7 @@ import {
   DirectDuelError,
   type DirectDuelEvent,
 } from "../../../../features/game/server/direct-duel-service";
+import { findUserById } from "../../../../features/account/server/users";
 import { directDuels } from "../../../../features/game/server/direct-duels";
 import { requestBody } from "../../../../features/game/server/http";
 import { currentRuntimePlayer } from "../../../../features/game/server/player-session";
@@ -27,6 +28,27 @@ function roundNumber(value: unknown) {
   return value;
 }
 
+function inviteToken(value: unknown) {
+  if (
+    typeof value !== "string" ||
+    !/^[A-Za-z0-9_-]{16,128}$/.test(value)
+  ) {
+    throw new DirectDuelError("A valid invite token is required.", 400);
+  }
+  return value;
+}
+
+async function playerWithProfile(
+  player: Awaited<ReturnType<typeof currentRuntimePlayer>>,
+) {
+  if (player.kind === "guest") return player;
+
+  const user = await findUserById(player.userId);
+  return user
+    ? { ...player, username: user.username, avatarId: user.avatarId }
+    : player;
+}
+
 function errorResponse(error: unknown) {
   if (error instanceof DirectDuelError) {
     return Response.json({ error: error.message }, { status: error.status });
@@ -49,8 +71,30 @@ export async function POST(request: Request) {
       return Response.json(directDuels().create(player, difficulty));
     }
 
+    if (body.action === "CREATE_INVITE") {
+      const difficulty = body.difficulty ?? "EASY";
+      if (!isGameDifficulty(difficulty)) {
+        throw new DirectDuelError("Difficulty must be EASY or REAL.", 400);
+      }
+      return Response.json(
+        directDuels().createInvite(
+          await playerWithProfile(player),
+          difficulty,
+        ),
+      );
+    }
+
     if (body.action === "JOIN") {
       return Response.json(directDuels().join(player, duelId(body.duelId)));
+    }
+
+    if (body.action === "JOIN_INVITE") {
+      return Response.json(
+        directDuels().joinInvite(
+          await playerWithProfile(player),
+          inviteToken(body.inviteToken),
+        ),
+      );
     }
 
     if (body.action === "SUBMIT") {

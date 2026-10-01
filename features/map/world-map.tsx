@@ -1,13 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Image from "next/image";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowLeft,
+  Check,
   ChevronRight,
   CircleHelp,
   Clock3,
+  Copy,
   Layers3,
   Map as MapIcon,
   Move,
@@ -16,6 +19,7 @@ import {
   Swords,
   Target,
   Trash2,
+  UsersRound,
   X,
 } from "lucide-react";
 import {
@@ -24,11 +28,13 @@ import {
   type GoogleMapsNamespace,
 } from "./google-drawing-map-adapter";
 import { Button } from "@/components/ui/button";
+import { avatarDefinition } from "@/features/account/avatars";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
 import {
   requestDirectDuelAbandon,
+  requestDirectDuelInviteJoin,
   requestDirectDuelReady,
   requestDirectDuelResultAnimationComplete,
   requestDirectDuelSubmission,
@@ -47,6 +53,7 @@ import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type {
   DirectDuelEvent,
   DirectDuelOutcome,
+  DirectDuelPreGame,
   DirectDuelResultPhase,
   DirectDuelRound,
 } from "../game/server/direct-duel-service";
@@ -354,14 +361,62 @@ type DuelRoundResult = {
   opponent: RuntimeRoundResolution;
 };
 
+function DuelParticipantCard({
+  player,
+  label,
+}: {
+  player?: RuntimePlayerSummary;
+  label: string;
+}) {
+  const avatar =
+    player?.kind === "registered" && player.avatarId
+      ? avatarDefinition(player.avatarId)
+      : undefined;
+  const name =
+    player?.kind === "registered"
+      ? (player.username ?? "Registered player")
+      : player
+        ? "Guest player"
+        : "Waiting…";
+
+  return (
+    <div className="rounded-xl border border-border bg-background/55 p-4 text-center">
+      <div className="mx-auto grid size-14 place-items-center overflow-hidden rounded-full border border-border bg-secondary text-lg font-black">
+        {avatar ? (
+          <Image
+            src={avatar.src}
+            alt=""
+            width={56}
+            height={56}
+            className="size-full object-cover"
+          />
+        ) : player ? (
+          name.slice(0, 1).toUpperCase()
+        ) : (
+          <UsersRound
+            className="size-6 text-muted-foreground"
+            aria-hidden="true"
+          />
+        )}
+      </div>
+      <p className="mt-3 text-[0.6rem] font-black tracking-[0.16em] text-muted-foreground uppercase">
+        {label}
+      </p>
+      <p className="mt-1 truncate text-sm font-black">{name}</p>
+    </div>
+  );
+}
+
 export function WorldMap({
   initialDifficulty,
   duelId,
+  inviteToken,
 }: {
   initialDifficulty?: GameDifficulty;
   duelId?: string;
+  inviteToken?: string;
 }) {
-  const isDuel = duelId !== undefined;
+  const isDuel = duelId !== undefined || inviteToken !== undefined;
   const router = useRouter();
   const mapContainer = useRef<HTMLDivElement>(null);
   const mapRef = useRef<GoogleMap>(null);
@@ -389,6 +444,14 @@ export function WorldMap({
     "connecting" | "connected" | "disconnected"
   >(isDuel ? "connecting" : "disconnected");
   const [duelPlayers, setDuelPlayers] = useState<RuntimePlayerSummary[]>([]);
+  const [activeDuelId, setActiveDuelId] = useState<string | null>(
+    duelId ?? null,
+  );
+  const [duelPreGame, setDuelPreGame] =
+    useState<DirectDuelPreGame | null>(null);
+  const [inviteLink, setInviteLink] = useState("");
+  const [inviteCopied, setInviteCopied] = useState(false);
+  const [inviteJoinFailed, setInviteJoinFailed] = useState(false);
   const [duelRound, setDuelRound] = useState<DirectDuelRound | null>(null);
   const [duelRoundResult, setDuelRoundResult] =
     useState<DuelRoundResult | null>(null);
@@ -417,10 +480,48 @@ export function WorldMap({
   const duelSubmittedRoundRef = useRef<number | null>(null);
   const duelAnimationCompleteRoundRef = useRef<number | null>(null);
   const duelPendingSubmissionsRef = useRef(0);
+  const inviteJoinAttemptedRef = useRef(false);
   const [isAutoStarting, setIsAutoStarting] = useState(
     !isDuel && initialDifficulty !== undefined,
   );
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY;
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    setInviteLink(
+      `${window.location.origin}/game?invite=${encodeURIComponent(inviteToken)}`,
+    );
+  }, [inviteToken]);
+
+  useEffect(() => {
+    if (
+      !inviteToken ||
+      duelId ||
+      activeDuelId ||
+      inviteJoinAttemptedRef.current
+    ) {
+      return;
+    }
+
+    inviteJoinAttemptedRef.current = true;
+    setDuelError(null);
+    requestDirectDuelInviteJoin(inviteToken)
+      .then((joined) => {
+        setActiveDuelId(joined.duelId);
+        if (joined.difficulty) setDifficulty(joined.difficulty);
+        router.replace(
+          `/game?duelId=${encodeURIComponent(joined.duelId)}` +
+            (joined.difficulty ? `&difficulty=${joined.difficulty}` : ""),
+        );
+      })
+      .catch((error: unknown) => {
+        setInviteJoinFailed(true);
+        setDuelConnection("disconnected");
+        setDuelError(
+          error instanceof Error ? error.message : "Could not join this invite.",
+        );
+      });
+  }, [activeDuelId, duelId, inviteToken, router]);
 
   useEffect(() => {
     const container = mapContainer.current;
@@ -497,12 +598,12 @@ export function WorldMap({
   }, [duelAbandonRole, duelOutcome, router, runtimePlayer]);
 
   useEffect(() => {
-    if (!duelRound || duelOutcome) return;
+    if ((!duelRound && !duelPreGame) || duelOutcome) return;
 
     setDuelNow(Date.now());
     const timer = window.setInterval(() => setDuelNow(Date.now()), 250);
     return () => window.clearInterval(timer);
-  }, [duelOutcome, duelRound]);
+  }, [duelOutcome, duelPreGame, duelRound]);
 
   const loadRound = async (
     requestRound: () => ReturnType<typeof requestGameStart>,
@@ -585,12 +686,12 @@ export function WorldMap({
   };
 
   const abandonDuel = async () => {
-    if (!duelId || isDuelAbandonPending) return;
+    if (!activeDuelId || isDuelAbandonPending) return;
 
     setIsDuelAbandonPending(true);
     setDuelError(null);
     try {
-      await requestDirectDuelAbandon(duelId);
+      await requestDirectDuelAbandon(activeDuelId);
     } catch (error) {
       setDuelError(
         error instanceof Error ? error.message : "Duel abandon failed.",
@@ -639,7 +740,7 @@ export function WorldMap({
   const submitDirectDuel = useCallback(
     async (submissionType: SubmissionType, roundNumber: number) => {
       if (
-        !duelId ||
+        !activeDuelId ||
         duelRoundNumberRef.current !== roundNumber ||
         duelSubmittedRoundRef.current === roundNumber
       ) {
@@ -652,7 +753,7 @@ export function WorldMap({
 
       try {
         await requestDirectDuelSubmission(
-          duelId,
+          activeDuelId,
           roundNumber,
           submissionType,
           currentPopulationShapes(drawRef.current),
@@ -666,16 +767,19 @@ export function WorldMap({
         if (duelPendingSubmissionsRef.current === 0) setIsSubmitting(false);
       }
     },
-    [duelId],
+    [activeDuelId],
   );
 
   const readyForNextDuelRound = async () => {
-    if (!duelId || !duelRoundResult || isDuelReadyPending) return;
+    if (!activeDuelId || !duelRoundResult || isDuelReadyPending) return;
 
     setIsDuelReadyPending(true);
     setDuelError(null);
     try {
-      await requestDirectDuelReady(duelId, duelRoundResult.roundNumber);
+      await requestDirectDuelReady(
+        activeDuelId,
+        duelRoundResult.roundNumber,
+      );
     } catch (error) {
       setDuelError(
         error instanceof Error ? error.message : "Could not mark player ready.",
@@ -687,7 +791,7 @@ export function WorldMap({
   const acknowledgeDuelResultAnimation = useCallback(
     async (roundNumber: number) => {
       if (
-        !duelId ||
+        !activeDuelId ||
         duelAnimationCompleteRoundRef.current === roundNumber
       ) {
         return;
@@ -696,7 +800,10 @@ export function WorldMap({
       duelAnimationCompleteRoundRef.current = roundNumber;
       setDuelAnimationCompleteRound(roundNumber);
       try {
-        await requestDirectDuelResultAnimationComplete(duelId, roundNumber);
+        await requestDirectDuelResultAnimationComplete(
+          activeDuelId,
+          roundNumber,
+        );
       } catch (error) {
         duelAnimationCompleteRoundRef.current = null;
         setDuelAnimationCompleteRound(null);
@@ -707,17 +814,17 @@ export function WorldMap({
         );
       }
     },
-    [duelId],
+    [activeDuelId],
   );
 
   useEffect(() => {
-    if (!duelId) return;
+    if (!activeDuelId) return;
 
     let lastSequence = 0;
     setDuelConnection("connecting");
-    setRuntimeGameId(duelId);
+    setRuntimeGameId(activeDuelId);
     const source = new EventSource(
-      `/api/duel/direct?duelId=${encodeURIComponent(duelId)}`,
+      `/api/duel/direct?duelId=${encodeURIComponent(activeDuelId)}`,
     );
 
     source.onopen = () => {
@@ -735,8 +842,23 @@ export function WorldMap({
         setRuntimePlayer(event.player);
       }
 
+      if (event.type === "waiting_for_opponent") {
+        if (event.players) setDuelPlayers(event.players);
+        if (event.difficulty) setDifficulty(event.difficulty);
+        setDuelPreGame(null);
+      }
+
+      if (event.type === "pre_game_started" && event.preGame) {
+        if (event.players) setDuelPlayers(event.players);
+        if (event.difficulty) setDifficulty(event.difficulty);
+        setDuelPreGame(event.preGame);
+        setDuelNow(Date.now());
+      }
+
       if (event.type === "game_started" && event.players) {
         setDuelPlayers(event.players);
+        if (event.difficulty) setDifficulty(event.difficulty);
+        setDuelPreGame(null);
       }
 
       if (event.type === "round_started" && event.round) {
@@ -744,6 +866,7 @@ export function WorldMap({
           duelRoundNumberRef.current !== event.round.roundNumber;
         duelRoundNumberRef.current = event.round.roundNumber;
         setDuelRound(event.round);
+        setDuelPreGame(null);
         setTarget(event.round.target);
         setCurrentRound(event.round.roundNumber);
         setDuelNow(Date.now());
@@ -858,7 +981,7 @@ export function WorldMap({
     };
 
     return () => source.close();
-  }, [duelId, submitDirectDuel]);
+  }, [activeDuelId, submitDirectDuel]);
 
   const submitPolygons = async () => {
     if (isDuel) {
@@ -949,6 +1072,14 @@ export function WorldMap({
         ),
       )
     : 0;
+  const duelPreGameRemainingSeconds = duelPreGame
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(duelPreGame.endsAt).getTime() - duelNow) / 1_000,
+        ),
+      )
+    : 0;
   const isCurrentDuelPlayerReady = Boolean(
     runtimePlayer &&
       duelReadyPlayerIds.includes(runtimePlayer.runtimePlayerId),
@@ -963,7 +1094,7 @@ export function WorldMap({
             {mapError}
           </div>
         )}
-        {duelError !== null && (
+        {duelError !== null && !inviteJoinFailed && (
           <div className="fixed inset-x-3 top-3 z-50 rounded-lg border border-red-300/20 bg-red-950/95 px-4 py-3 text-center text-sm text-red-100 shadow-xl">
             {duelError}
           </div>
@@ -1586,12 +1717,23 @@ export function WorldMap({
           <div className="fixed inset-0 z-40 grid place-items-center bg-black/45 p-4 text-foreground backdrop-blur-[2px]">
             <section className="w-full max-w-sm rounded-2xl border border-white/10 bg-background/95 p-6 text-center shadow-2xl">
               <Swords className="mx-auto size-8 text-primary" aria-hidden="true" />
-              <h1 className="mt-4 text-2xl font-black">Connecting to Duel</h1>
+              <h1 className="mt-4 text-2xl font-black">
+                {inviteJoinFailed ? "Invite unavailable" : "Connecting to Duel"}
+              </h1>
               <p className="mt-2 text-sm text-muted-foreground">
-                {duelConnection === "disconnected"
-                  ? "Connection lost. Retrying…"
-                  : "Opening the live game channel…"}
+                {inviteJoinFailed
+                  ? (duelError ?? "This invite cannot be joined.")
+                  : duelConnection === "disconnected"
+                    ? "Connection lost. Retrying…"
+                    : inviteToken && !activeDuelId
+                      ? "Validating your invite…"
+                      : "Opening the live game channel…"}
               </p>
+              {inviteJoinFailed && (
+                <Button asChild className="mt-5 w-full font-black">
+                  <Link href="/">Back home</Link>
+                </Button>
+              )}
             </section>
           </div>
         )}
@@ -1604,18 +1746,90 @@ export function WorldMap({
               <section className="w-full max-w-lg rounded-2xl border border-white/10 bg-background/95 p-6 text-center shadow-2xl sm:p-8">
                 <Swords className="mx-auto size-9 text-primary" aria-hidden="true" />
                 <p className="mt-5 text-xs font-black tracking-[0.18em] text-primary uppercase">
-                  Direct 1v1
+                  1v1 · {difficulty === "EASY" ? "Easy" : "Real"} · Unrated
                 </p>
-                <h1 className="mt-2 text-3xl font-black">
-                  Waiting for opponent
-                </h1>
-                <p className="mt-3 text-sm text-muted-foreground">
-                  Open the development launcher in another browser profile and
-                  join with this Duel ID.
-                </p>
-                <code className="mt-5 block select-all break-all rounded-lg border border-border bg-black/35 p-3 font-mono text-sm text-sky-200">
-                  {duelId}
-                </code>
+                {duelPreGame ? (
+                  <>
+                    <h1 className="mt-2 text-3xl font-black">Players ready</h1>
+                    <div className="mt-5 grid grid-cols-2 gap-3">
+                      <DuelParticipantCard
+                        player={duelPlayers[0]}
+                        label="Creator"
+                      />
+                      <DuelParticipantCard
+                        player={duelPlayers[1]}
+                        label="Opponent"
+                      />
+                    </div>
+                    <p className="mt-6 text-xs font-black tracking-[0.16em] text-muted-foreground uppercase">
+                      Round 1 starts in
+                    </p>
+                    <p className="mt-1 font-mono text-6xl font-black text-primary tabular-nums">
+                      {duelPreGameRemainingSeconds}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <h1 className="mt-2 text-3xl font-black">
+                      Waiting for opponent
+                    </h1>
+                    <div className="mx-auto mt-5 max-w-52">
+                      <DuelParticipantCard
+                        player={duelPlayers[0]}
+                        label="Creator"
+                      />
+                    </div>
+                    {inviteLink ? (
+                      <>
+                        <p className="mt-5 text-sm text-muted-foreground">
+                          Share this short-lived link with the player you want to
+                          challenge.
+                        </p>
+                        <div className="mt-3 flex gap-2 rounded-lg border border-border bg-black/35 p-2">
+                          <code className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-sky-200">
+                            {inviteLink}
+                          </code>
+                          <Button
+                            type="button"
+                            size="sm"
+                            onClick={() => {
+                              void navigator.clipboard
+                                .writeText(inviteLink)
+                                .then(() => {
+                                  setInviteCopied(true);
+                                  window.setTimeout(
+                                    () => setInviteCopied(false),
+                                    1_500,
+                                  );
+                                })
+                                .catch(() =>
+                                  setDuelError("Could not copy the invite link."),
+                                );
+                            }}
+                            className="shrink-0 font-black"
+                          >
+                            {inviteCopied ? (
+                              <Check aria-hidden="true" />
+                            ) : (
+                              <Copy aria-hidden="true" />
+                            )}
+                            {inviteCopied ? "Copied" : "Copy"}
+                          </Button>
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <p className="mt-5 text-sm text-muted-foreground">
+                          Development Duel: join from another browser profile
+                          with this Duel ID.
+                        </p>
+                        <code className="mt-3 block select-all break-all rounded-lg border border-border bg-black/35 p-3 font-mono text-sm text-sky-200">
+                          {activeDuelId}
+                        </code>
+                      </>
+                    )}
+                  </>
+                )}
                 <div className="mt-4 flex items-center justify-center gap-2 text-xs text-muted-foreground">
                   <span
                     className={cn(
@@ -1628,6 +1842,11 @@ export function WorldMap({
                   {duelConnection === "connected" ? "Connected" : "Reconnecting"}
                   {duelPlayers.length > 0 && ` · ${duelPlayers.length}/2 players`}
                 </div>
+                {!duelPreGame && (
+                  <Button asChild variant="ghost" size="sm" className="mt-3">
+                    <Link href="/">Back home</Link>
+                  </Button>
+                )}
               </section>
             </div>
           )}

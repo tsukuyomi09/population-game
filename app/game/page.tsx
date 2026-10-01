@@ -8,15 +8,19 @@ export default async function GamePage({
   searchParams: Promise<{
     difficulty?: string | string[];
     duelId?: string | string[];
+    invite?: string | string[];
   }>;
 }) {
-  const { difficulty, duelId } = await searchParams;
+  const { difficulty, duelId, invite } = await searchParams;
 
   return (
     <DesktopGameGate>
       <WorldMap
         initialDifficulty={isGameDifficulty(difficulty) ? difficulty : undefined}
         duelId={typeof duelId === "string" && duelId.length > 0 ? duelId : undefined}
+        inviteToken={
+          typeof invite === "string" && invite.length > 0 ? invite : undefined
+        }
       />
     </DesktopGameGate>
   );

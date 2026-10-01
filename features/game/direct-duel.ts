@@ -4,12 +4,23 @@ import {
   isRuntimePlayerSummary,
   type RuntimePlayerSummary,
 } from "./runtime-player";
-import type { GameDifficulty, SubmissionType } from "./single-player";
+import {
+  isGameDifficulty,
+  type GameDifficulty,
+  type SubmissionType,
+} from "./single-player";
 
 type DirectDuelStart = {
   duelId: string;
   player: RuntimePlayerSummary;
+  difficulty?: GameDifficulty;
+  rated?: false;
   round?: DirectDuelRound;
+};
+
+type DirectDuelInviteStart = DirectDuelStart & {
+  inviteToken: string;
+  inviteExpiresAt: string;
 };
 
 async function postDirectDuelAction(body: Record<string, unknown>) {
@@ -41,7 +52,31 @@ function directDuelStart(data: Record<string, unknown>): DirectDuelStart {
   return {
     duelId: data.duelId,
     player: data.player,
+    difficulty: isGameDifficulty(data.difficulty)
+      ? data.difficulty
+      : undefined,
+    rated: data.rated === false ? false : undefined,
     round: data.round as DirectDuelRound | undefined,
+  };
+}
+
+function directDuelInviteStart(
+  data: Record<string, unknown>,
+): DirectDuelInviteStart {
+  const start = directDuelStart(data);
+  if (
+    typeof data.inviteToken !== "string" ||
+    data.inviteToken.length === 0 ||
+    typeof data.inviteExpiresAt !== "string" ||
+    !Number.isFinite(Date.parse(data.inviteExpiresAt))
+  ) {
+    throw new Error("Duel action returned an invalid invite.");
+  }
+
+  return {
+    ...start,
+    inviteToken: data.inviteToken,
+    inviteExpiresAt: data.inviteExpiresAt,
   };
 }
 
@@ -54,6 +89,20 @@ export async function requestDirectDuelCreate(difficulty: GameDifficulty) {
 export async function requestDirectDuelJoin(duelId: string) {
   return directDuelStart(
     await postDirectDuelAction({ action: "JOIN", duelId }),
+  );
+}
+
+export async function requestDirectDuelInviteCreate(
+  difficulty: GameDifficulty,
+) {
+  return directDuelInviteStart(
+    await postDirectDuelAction({ action: "CREATE_INVITE", difficulty }),
+  );
+}
+
+export async function requestDirectDuelInviteJoin(inviteToken: string) {
+  return directDuelStart(
+    await postDirectDuelAction({ action: "JOIN_INVITE", inviteToken }),
   );
 }
 
