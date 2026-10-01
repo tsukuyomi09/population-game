@@ -27,7 +27,11 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
 import { createPolygonFeatureCollection } from "../drawing/polygons";
-import { requestDirectDuelSubmission } from "../game/direct-duel";
+import {
+  requestDirectDuelReady,
+  requestDirectDuelResultAnimationComplete,
+  requestDirectDuelSubmission,
+} from "../game/direct-duel";
 import {
   type GameDifficulty,
   MAX_GAME_SCORE,
@@ -42,6 +46,7 @@ import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type {
   DirectDuelEvent,
   DirectDuelOutcome,
+  DirectDuelResultPhase,
   DirectDuelRound,
 } from "../game/server/direct-duel-service";
 import type { RuntimeRoundResolution } from "../game/server/runtime-game";
@@ -151,14 +156,23 @@ function scoreRevealTone(score: number) {
   };
 }
 
-function ScoreReveal({ score }: { score: number }) {
+function ScoreReveal({
+  score,
+  onComplete,
+}: {
+  score: number;
+  onComplete?: () => void;
+}) {
   const finalRatio = Math.min(1, Math.max(0, score / MAX_ROUND_SCORE));
   const [reveal, setReveal] = useState({ score: 0, ratio: 0 });
   const tone = scoreRevealTone(score);
+  const onCompleteRef = useRef(onComplete);
+  onCompleteRef.current = onComplete;
 
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
       setReveal({ score, ratio: finalRatio });
+      onCompleteRef.current?.();
       return;
     }
 
@@ -177,7 +191,11 @@ function ScoreReveal({ score }: { score: number }) {
         ratio: progress === 1 ? finalRatio : finalRatio * eased,
       });
 
-      if (progress < 1) animationFrame = requestAnimationFrame(update);
+      if (progress < 1) {
+        animationFrame = requestAnimationFrame(update);
+      } else {
+        onCompleteRef.current?.();
+      }
     };
 
     animationFrame = requestAnimationFrame(update);
@@ -373,6 +391,12 @@ export function WorldMap({
   const [duelRound, setDuelRound] = useState<DirectDuelRound | null>(null);
   const [duelRoundResult, setDuelRoundResult] =
     useState<DuelRoundResult | null>(null);
+  const [duelResultPhase, setDuelResultPhase] =
+    useState<DirectDuelResultPhase | null>(null);
+  const [duelAnimationCompleteRound, setDuelAnimationCompleteRound] =
+    useState<number | null>(null);
+  const [duelReadyPlayerIds, setDuelReadyPlayerIds] = useState<string[]>([]);
+  const [isDuelReadyPending, setIsDuelReadyPending] = useState(false);
   const [duelOutcome, setDuelOutcome] = useState<DirectDuelOutcome | null>(null);
   const [opponentTotalScore, setOpponentTotalScore] = useState(0);
   const [duelSubmitted, setDuelSubmitted] = useState(false);
@@ -386,6 +410,7 @@ export function WorldMap({
   const runtimePlayerRef = useRef<RuntimePlayerSummary | null>(null);
   const duelRoundNumberRef = useRef<number | null>(null);
   const duelSubmittedRoundRef = useRef<number | null>(null);
+  const duelAnimationCompleteRoundRef = useRef<number | null>(null);
   const duelPendingSubmissionsRef = useRef(0);
   const [isAutoStarting, setIsAutoStarting] = useState(
     !isDuel && initialDifficulty !== undefined,
@@ -612,6 +637,47 @@ export function WorldMap({
     [duelId],
   );
 
+  const readyForNextDuelRound = async () => {
+    if (!duelId || !duelRoundResult || isDuelReadyPending) return;
+
+    setIsDuelReadyPending(true);
+    setDuelError(null);
+    try {
+      await requestDirectDuelReady(duelId, duelRoundResult.roundNumber);
+    } catch (error) {
+      setDuelError(
+        error instanceof Error ? error.message : "Could not mark player ready.",
+      );
+      setIsDuelReadyPending(false);
+    }
+  };
+
+  const acknowledgeDuelResultAnimation = useCallback(
+    async (roundNumber: number) => {
+      if (
+        !duelId ||
+        duelAnimationCompleteRoundRef.current === roundNumber
+      ) {
+        return;
+      }
+
+      duelAnimationCompleteRoundRef.current = roundNumber;
+      setDuelAnimationCompleteRound(roundNumber);
+      try {
+        await requestDirectDuelResultAnimationComplete(duelId, roundNumber);
+      } catch (error) {
+        duelAnimationCompleteRoundRef.current = null;
+        setDuelAnimationCompleteRound(null);
+        setDuelError(
+          error instanceof Error
+            ? error.message
+            : "Could not complete the result animation.",
+        );
+      }
+    },
+    [duelId],
+  );
+
   useEffect(() => {
     if (!duelId) return;
 
@@ -654,10 +720,21 @@ export function WorldMap({
           duelSubmittedRoundRef.current = null;
           setDuelSubmitted(false);
           setOpponentSubmitted(false);
+          setDuelRoundResult(null);
+          setDuelResultPhase(null);
+          setDuelAnimationCompleteRound(null);
+          setDuelReadyPlayerIds([]);
+          setIsDuelReadyPending(false);
+          duelAnimationCompleteRoundRef.current = null;
           roundVersionRef.current += 1;
           drawRef.current?.reset();
           setCompletedDrawingCount(0);
         }
+      }
+
+      if (event.type === "round_deadline_updated" && event.round) {
+        setDuelRound(event.round);
+        setDuelNow(Date.now());
       }
 
       if (
@@ -711,11 +788,23 @@ export function WorldMap({
         }
       }
 
+      if (event.type === "result_phase_started" && event.resultPhase) {
+        setDuelResultPhase(event.resultPhase);
+        setDuelReadyPlayerIds(event.resultPhase.readyRuntimePlayerIds);
+        setDuelNow(Date.now());
+      }
+
+      if (event.type === "player_ready" && event.readyRuntimePlayerIds) {
+        setDuelReadyPlayerIds(event.readyRuntimePlayerIds);
+      }
+
       if (event.type === "game_completed" && event.outcome) {
         setDuelOutcome(event.outcome);
         setTotalScore(event.totalScore ?? 0);
         setOpponentTotalScore(event.opponentTotalScore ?? 0);
         setDuelRound(null);
+        setDuelResultPhase(null);
+        setDuelAnimationCompleteRound(null);
         setTarget(null);
       }
     };
@@ -804,6 +893,18 @@ export function WorldMap({
   const duelRemainingSeconds = duelRound
     ? Math.max(0, Math.ceil((new Date(duelRound.endsAt).getTime() - duelNow) / 1_000))
     : 0;
+  const duelResultRemainingSeconds = duelResultPhase
+    ? Math.max(
+        0,
+        Math.ceil(
+          (new Date(duelResultPhase.endsAt).getTime() - duelNow) / 1_000,
+        ),
+      )
+    : 0;
+  const isCurrentDuelPlayerReady = Boolean(
+    runtimePlayer &&
+      duelReadyPlayerIds.includes(runtimePlayer.runtimePlayerId),
+  );
 
   return (
     <>
@@ -967,7 +1068,8 @@ export function WorldMap({
 
         {runtimePlayer !== null &&
           target !== null &&
-          populationResponse === null && (
+          populationResponse === null &&
+          (!isDuel || duelRoundResult === null) && (
             <>
               <div className="fixed top-3 left-3 z-20 flex items-center gap-3 rounded-lg border border-cyan-300/20 bg-slate-950/90 px-3 py-1.5 text-slate-50 shadow-md backdrop-blur-[2px]">
                 <div>
@@ -1138,14 +1240,35 @@ export function WorldMap({
 
         {isDuel && duelRoundResult !== null && duelOutcome === null && (
           <div className="animate-in fade-in fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/45 p-4 text-foreground backdrop-blur-[2px] duration-300">
-            <section className="animate-in zoom-in-95 my-auto w-full max-w-lg rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300">
+            <section className="animate-in zoom-in-95 relative my-auto w-full max-w-lg rounded-2xl border border-white/10 bg-background/96 p-6 text-center shadow-2xl duration-300">
+              {duelResultPhase && (
+                <div className="absolute top-4 left-4 flex w-14 flex-col items-center text-red-400">
+                  <span
+                    key={duelResultRemainingSeconds}
+                    className="animate-in fade-in zoom-in-95 font-mono text-4xl leading-none font-black tabular-nums duration-300"
+                    aria-label={`${duelResultRemainingSeconds} seconds until next round`}
+                  >
+                    {duelResultRemainingSeconds}
+                  </span>
+                  <span className="mt-1 text-[0.48rem] leading-tight font-black tracking-[0.12em] uppercase">
+                    Next round
+                  </span>
+                </div>
+              )}
               <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
                 1v1 · Round {duelRoundResult.roundNumber}
               </p>
               <h1 className="mt-2 text-3xl font-black">Round result</h1>
 
               <div className="mt-6">
-                <ScoreReveal score={duelRoundResult.own.score} />
+                <ScoreReveal
+                  score={duelRoundResult.own.score}
+                  onComplete={() =>
+                    void acknowledgeDuelResultAnimation(
+                      duelRoundResult.roundNumber,
+                    )
+                  }
+                />
               </div>
 
               <dl className="mt-6 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border">
@@ -1173,19 +1296,27 @@ export function WorldMap({
                 <ScoreProgress scores={roundScores} compact />
               </div>
 
-              <Button
-                type="button"
-                onClick={() => setDuelRoundResult(null)}
-                className="mt-6 h-11 w-full max-w-64 font-black"
-              >
-                {currentRound > duelRoundResult.roundNumber
-                  ? `Play round ${currentRound}`
-                  : "Continue"}
-                <ChevronRight aria-hidden="true" />
-              </Button>
-              {currentRound > duelRoundResult.roundNumber && (
-                <p className="mt-2 font-mono text-xs text-muted-foreground">
-                  {duelRemainingSeconds}s remain on the authoritative clock
+              {duelResultPhase ? (
+                <>
+                  <Button
+                    type="button"
+                    onClick={() => void readyForNextDuelRound()}
+                    disabled={isDuelReadyPending || isCurrentDuelPlayerReady}
+                    className="mt-6 h-11 w-full max-w-64 font-black"
+                  >
+                    {isCurrentDuelPlayerReady || isDuelReadyPending
+                      ? "Waiting for opponent…"
+                      : "Next round"}
+                    {!isCurrentDuelPlayerReady && !isDuelReadyPending && (
+                      <ChevronRight aria-hidden="true" />
+                    )}
+                  </Button>
+                </>
+              ) : (
+                <p className="mt-6 font-mono text-xs text-muted-foreground">
+                  {duelAnimationCompleteRound === duelRoundResult.roundNumber
+                    ? "Waiting for opponent’s result…"
+                    : "Revealing round score…"}
                 </p>
               )}
             </section>

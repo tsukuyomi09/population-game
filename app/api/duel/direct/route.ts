@@ -100,6 +100,26 @@ export async function POST(request: Request) {
       });
     }
 
+    if (body.action === "READY_NEXT_ROUND") {
+      return Response.json(
+        directDuels().readyForNextRound(
+          duelId(body.duelId),
+          player,
+          roundNumber(body.roundNumber),
+        ),
+      );
+    }
+
+    if (body.action === "RESULT_ANIMATION_COMPLETE") {
+      return Response.json(
+        directDuels().completeResultAnimation(
+          duelId(body.duelId),
+          player,
+          roundNumber(body.roundNumber),
+        ),
+      );
+    }
+
     throw new DirectDuelError("Unknown Direct Duel action.", 400);
   } catch (error) {
     return errorResponse(error);

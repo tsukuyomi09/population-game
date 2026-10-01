@@ -9,6 +9,7 @@ import {
   RuntimeGame,
   RuntimeGameTransitionError,
   type RuntimeGameSnapshot,
+  type RuntimeResultPhaseSnapshot,
   type RuntimeRoundResolution,
   type RuntimeRoundSnapshot,
 } from "./runtime-game";
@@ -23,6 +24,13 @@ export type DirectDuelRound = {
 
 export type DirectDuelOutcome = "WIN" | "LOSS" | "DRAW";
 
+export type DirectDuelResultPhase = {
+  roundNumber: number;
+  startedAt: string;
+  endsAt: string;
+  readyRuntimePlayerIds: string[];
+};
+
 export type DirectDuelEvent = {
   sequence: number;
   duelId: string;
@@ -30,14 +38,19 @@ export type DirectDuelEvent = {
     | "connected"
     | "game_started"
     | "round_started"
+    | "round_deadline_updated"
     | "submission_accepted"
     | "opponent_submitted"
     | "timeout_submission_requested"
     | "round_resolved"
+    | "result_phase_started"
+    | "player_ready"
     | "game_completed";
   player?: RuntimePlayerSummary;
   players?: RuntimePlayerSummary[];
   round?: DirectDuelRound;
+  resultPhase?: DirectDuelResultPhase;
+  readyRuntimePlayerIds?: string[];
   roundNumber?: number;
   runtimePlayerId?: string;
   requestedAt?: string;
@@ -57,12 +70,15 @@ type DirectDuelSession = {
   sequence: number;
   listeners: Map<string, Set<(event: DirectDuelEvent) => void>>;
   cancelRoundTimer?: () => void;
+  cancelResultTimer?: () => void;
 };
 
 type DirectDuelServiceOptions = {
   generateDuelId: () => string;
   generateTarget: () => number;
   roundDurationMs: number;
+  finalWindowMs: number;
+  resultPhaseDurationMs: number;
   now: () => Date;
   schedule: (callback: () => void, delayMs: number) => () => void;
 };
@@ -93,6 +109,24 @@ function roundDefinition(round: RuntimeRoundSnapshot): DirectDuelRound {
     target: round.targetPopulation,
     startedAt: round.startedAt.toISOString(),
     endsAt: round.endsAt.toISOString(),
+  };
+}
+
+function resultPhaseDefinition(
+  resultPhase: RuntimeResultPhaseSnapshot,
+): DirectDuelResultPhase {
+  if (
+    resultPhase.state !== "WAITING" ||
+    !resultPhase.startedAt ||
+    !resultPhase.endsAt
+  ) {
+    throw new Error("Duel result wait has not started.");
+  }
+  return {
+    roundNumber: resultPhase.roundNumber,
+    startedAt: resultPhase.startedAt.toISOString(),
+    endsAt: resultPhase.endsAt.toISOString(),
+    readyRuntimePlayerIds: resultPhase.readyRuntimePlayerIds,
   };
 }
 
@@ -149,6 +183,8 @@ export class DirectDuelService {
       difficulty: session.difficulty,
       players: session.players,
       roundDurationMs: this.options.roundDurationMs,
+      finalWindowMs: this.options.finalWindowMs,
+      resultPhaseDurationMs: this.options.resultPhaseDurationMs,
       generateTarget: this.options.generateTarget,
     });
     session.game = game;
@@ -186,15 +222,38 @@ export class DirectDuelService {
       player: toRuntimePlayerSummary(player),
     });
     const snapshot = session.game?.snapshot();
-    if (snapshot?.currentRound) {
+    if (snapshot) {
       this.emit(session, listener, {
         type: "game_started",
         players: session.players.map(toRuntimePlayerSummary),
       });
-      this.emit(session, listener, {
-        type: "round_started",
-        round: roundDefinition(snapshot.currentRound),
-      });
+      if (snapshot.currentRound) {
+        this.emit(session, listener, {
+          type: "round_started",
+          round: roundDefinition(snapshot.currentRound),
+        });
+      } else if (snapshot.resultPhase) {
+        const resolvedRound = snapshot.rounds.find(
+          (round) => round.roundNumber === snapshot.resultPhase?.roundNumber,
+        );
+        if (resolvedRound) {
+          this.emit(session, listener, {
+            type: "round_resolved",
+            roundNumber: resolvedRound.roundNumber,
+            results: resolvedRound.players.flatMap((state) =>
+              state.resolution ? [state.resolution] : [],
+            ),
+            totals: snapshot.totals,
+          });
+          if (snapshot.resultPhase.state === "WAITING") {
+            this.emit(session, listener, {
+              type: "result_phase_started",
+              roundNumber: snapshot.resultPhase.roundNumber,
+              resultPhase: resultPhaseDefinition(snapshot.resultPhase),
+            });
+          }
+        }
+      }
     }
 
     return () => {
@@ -251,7 +310,20 @@ export class DirectDuelService {
       runtimePlayerId: player.runtimePlayerId,
     });
 
-    if (resolution.roundAdvanced || resolution.gameFinalized) {
+    if (resolution.deadlineUpdated) {
+      const activeRound = game.snapshot().currentRound;
+      if (!activeRound) {
+        throw new Error("Updated Duel deadline has no active round.");
+      }
+      this.broadcast(session, {
+        type: "round_deadline_updated",
+        round: roundDefinition(activeRound),
+        roundNumber,
+      });
+      this.scheduleRound(session, activeRound);
+    }
+
+    if (resolution.roundResultStarted || resolution.gameFinalized) {
       const snapshot = game.snapshot();
       const resolvedRound = snapshot.rounds.find(
         (round) => round.roundNumber === roundNumber,
@@ -269,20 +341,84 @@ export class DirectDuelService {
         totals: snapshot.totals,
       });
 
+      session.cancelRoundTimer?.();
+      session.cancelRoundTimer = undefined;
+
       if (resolution.gameFinalized) {
-        session.cancelRoundTimer?.();
-        session.cancelRoundTimer = undefined;
         this.sendCompletion(session, snapshot);
-      } else if (snapshot.currentRound) {
-        this.broadcast(session, {
-          type: "round_started",
-          round: roundDefinition(snapshot.currentRound),
-        });
-        this.scheduleRound(session, snapshot.currentRound);
       }
     }
 
     return resolution;
+  }
+
+  completeResultAnimation(
+    duelId: string,
+    player: RuntimePlayer,
+    roundNumber: number,
+  ) {
+    const session = this.session(duelId);
+    this.sessionPlayer(session, player);
+    const game = session.game;
+    if (!game) throw new DirectDuelError("The Duel has not started.", 409);
+
+    const completion = game.completeResultAnimation(
+      player,
+      roundNumber,
+      this.options.now(),
+    );
+    if (completion.resultWaitStarted && completion.resultPhase) {
+      this.broadcast(session, {
+        type: "result_phase_started",
+        roundNumber,
+        resultPhase: resultPhaseDefinition(completion.resultPhase),
+      });
+      this.scheduleResultPhase(session, completion.resultPhase);
+    }
+
+    return completion;
+  }
+
+  readyForNextRound(
+    duelId: string,
+    player: RuntimePlayer,
+    roundNumber: number,
+  ) {
+    const session = this.session(duelId);
+    this.sessionPlayer(session, player);
+    const game = session.game;
+    if (!game) throw new DirectDuelError("The Duel has not started.", 409);
+
+    let readiness;
+    try {
+      readiness = game.readyForNextRound(
+        player,
+        roundNumber,
+        this.options.now(),
+      );
+    } catch (error) {
+      if (error instanceof RuntimeGameTransitionError) {
+        throw new DirectDuelError(error.message, 409);
+      }
+      throw error;
+    }
+
+    if (readiness.status === "APPLIED") {
+      this.broadcast(session, {
+        type: "player_ready",
+        roundNumber,
+        runtimePlayerId: player.runtimePlayerId,
+        readyRuntimePlayerIds: readiness.readyRuntimePlayerIds,
+      });
+    }
+
+    if (readiness.roundAdvanced && readiness.nextRound) {
+      session.cancelResultTimer?.();
+      session.cancelResultTimer = undefined;
+      this.startRound(session, readiness.nextRound);
+    }
+
+    return readiness;
   }
 
   private joinedState(session: DirectDuelSession, player: RuntimePlayer) {
@@ -307,6 +443,38 @@ export class DirectDuelService {
       session.cancelRoundTimer = undefined;
       this.requestTimeoutSubmissions(session, round);
     }, delayMs);
+  }
+
+  private scheduleResultPhase(
+    session: DirectDuelSession,
+    resultPhase: RuntimeResultPhaseSnapshot,
+  ) {
+    if (resultPhase.state !== "WAITING" || !resultPhase.endsAt) {
+      throw new Error("Cannot schedule a Duel result wait before it starts.");
+    }
+    session.cancelResultTimer?.();
+    const delayMs = Math.max(
+      0,
+      resultPhase.endsAt.getTime() - this.options.now().getTime(),
+    );
+    session.cancelResultTimer = this.options.schedule(() => {
+      session.cancelResultTimer = undefined;
+      const advanced = session.game?.advanceResultPhase(
+        resultPhase.roundNumber,
+        this.options.now(),
+      );
+      if (advanced?.roundAdvanced && advanced.nextRound) {
+        this.startRound(session, advanced.nextRound);
+      }
+    }, delayMs);
+  }
+
+  private startRound(session: DirectDuelSession, round: RuntimeRoundSnapshot) {
+    this.broadcast(session, {
+      type: "round_started",
+      round: roundDefinition(round),
+    });
+    this.scheduleRound(session, round);
   }
 
   private requestTimeoutSubmissions(

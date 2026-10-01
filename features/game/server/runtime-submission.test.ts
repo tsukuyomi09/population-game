@@ -32,6 +32,8 @@ test("timeout request waits for the client drawing submission", async () => {
     difficulty: "EASY",
     players: [player],
     roundDurationMs: 60_000,
+    finalWindowMs: 10_000,
+    resultPhaseDurationMs: 4_000,
     generateTarget: () => 1_000,
   });
   game.start(startedAt);

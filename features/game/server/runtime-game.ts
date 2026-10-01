@@ -11,7 +11,11 @@ import {
 } from "../runtime-player";
 
 export type RuntimeGameType = "SINGLE" | "DUEL";
-export type RuntimeGameLifecycle = "CREATED" | "ROUND_ACTIVE" | "COMPLETE";
+export type RuntimeGameLifecycle =
+  | "CREATED"
+  | "ROUND_ACTIVE"
+  | "ROUND_RESULT"
+  | "COMPLETE";
 export type RuntimeRoundLifecycle = "ACTIVE" | "RESOLVED";
 export type RuntimePlayerRoundLifecycle = "PENDING" | "RESOLVED";
 
@@ -45,15 +49,48 @@ export type RuntimeGameSnapshot = {
   state: RuntimeGameLifecycle;
   rounds: RuntimeRoundSnapshot[];
   currentRound?: RuntimeRoundSnapshot;
+  resultPhase?: RuntimeResultPhaseSnapshot;
   totals: Record<string, number>;
   completedAt?: Date;
+};
+
+export type RuntimeResultPhaseSnapshot = {
+  roundNumber: number;
+  state: "ANIMATING" | "WAITING";
+  animationCompleteRuntimePlayerIds: string[];
+  readyRuntimePlayerIds: string[];
+  startedAt?: Date;
+  endsAt?: Date;
 };
 
 export type RuntimeResolutionOutcome = {
   status: "APPLIED" | "DUPLICATE";
   resolution: RuntimeRoundResolution;
   roundAdvanced: boolean;
+  roundResultStarted: boolean;
+  deadlineUpdated: boolean;
   gameFinalized: boolean;
+};
+
+export type RuntimeReadyOutcome = {
+  status: "APPLIED" | "DUPLICATE";
+  roundNumber: number;
+  readyRuntimePlayerIds: string[];
+  roundAdvanced: boolean;
+  nextRound?: RuntimeRoundSnapshot;
+};
+
+export type RuntimeResultAdvanceOutcome = {
+  status: "APPLIED" | "STALE";
+  roundAdvanced: boolean;
+  nextRound?: RuntimeRoundSnapshot;
+};
+
+export type RuntimeAnimationCompleteOutcome = {
+  status: "APPLIED" | "DUPLICATE" | "STALE";
+  roundNumber: number;
+  resultWaitStarted: boolean;
+  resultPhase?: RuntimeResultPhaseSnapshot;
 };
 
 export type RuntimeTimeoutSubmissionRequest = {
@@ -79,12 +116,23 @@ type RuntimeRoundState = {
   players: PlayerRoundState[];
 };
 
+type RuntimeResultPhaseState = {
+  roundNumber: number;
+  state: "ANIMATING" | "WAITING";
+  animationCompleteRuntimePlayerIds: Set<string>;
+  readyRuntimePlayerIds: Set<string>;
+  startedAt?: Date;
+  endsAt?: Date;
+};
+
 type RuntimeGameOptions = {
   runtimeGameId: string;
   type: RuntimeGameType;
   difficulty: GameDifficulty;
   players: RuntimePlayer[];
   roundDurationMs: number;
+  finalWindowMs: number;
+  resultPhaseDurationMs: number;
   generateTarget: () => number;
 };
 
@@ -123,6 +171,7 @@ export class RuntimeGame {
   private lifecycle: RuntimeGameLifecycle = "CREATED";
   private readonly rounds: RuntimeRoundState[] = [];
   private readonly totals = new Map<string, number>();
+  private resultPhase?: RuntimeResultPhaseState;
   private completedAt?: Date;
 
   constructor(private readonly options: RuntimeGameOptions) {
@@ -140,6 +189,17 @@ export class RuntimeGame {
     }
     if (!Number.isFinite(options.roundDurationMs) || options.roundDurationMs <= 0) {
       throw new RuntimeGameTransitionError("Round duration must be positive.");
+    }
+    if (!Number.isFinite(options.finalWindowMs) || options.finalWindowMs <= 0) {
+      throw new RuntimeGameTransitionError("Final window must be positive.");
+    }
+    if (
+      !Number.isFinite(options.resultPhaseDurationMs) ||
+      options.resultPhaseDurationMs <= 0
+    ) {
+      throw new RuntimeGameTransitionError(
+        "Result phase duration must be positive.",
+      );
     }
 
     for (const player of options.players) {
@@ -200,6 +260,8 @@ export class RuntimeGame {
         status: "DUPLICATE",
         resolution: resolutionSnapshot(playerState.resolution),
         roundAdvanced: false,
+        roundResultStarted: false,
+        deadlineUpdated: false,
         gameFinalized: false,
       };
     }
@@ -250,7 +312,27 @@ export class RuntimeGame {
       (this.totals.get(input.player.runtimePlayerId) ?? 0) + resolution.score,
     );
 
+    let deadlineUpdated = false;
+    if (
+      this.options.type === "DUEL" &&
+      input.submissionType === "MANUAL" &&
+      round.players.some(
+        (candidate) =>
+          candidate.player.runtimePlayerId !== input.player.runtimePlayerId &&
+          candidate.state === "PENDING",
+      )
+    ) {
+      const cappedDeadline = new Date(
+        input.resolvedAt.getTime() + this.options.finalWindowMs,
+      );
+      if (cappedDeadline < round.endsAt) {
+        round.endsAt = cappedDeadline;
+        deadlineUpdated = true;
+      }
+    }
+
     let roundAdvanced = false;
+    let roundResultStarted = false;
     let gameFinalized = false;
     if (round.players.every((candidate) => candidate.state === "RESOLVED")) {
       round.state = "RESOLVED";
@@ -258,6 +340,15 @@ export class RuntimeGame {
         this.lifecycle = "COMPLETE";
         this.completedAt = new Date(input.resolvedAt);
         gameFinalized = true;
+      } else if (this.options.type === "DUEL") {
+        this.lifecycle = "ROUND_RESULT";
+        this.resultPhase = {
+          roundNumber: round.roundNumber,
+          state: "ANIMATING",
+          animationCompleteRuntimePlayerIds: new Set(),
+          readyRuntimePlayerIds: new Set(),
+        };
+        roundResultStarted = true;
       } else {
         this.createRound(round.roundNumber + 1, input.resolvedAt);
         roundAdvanced = true;
@@ -268,7 +359,134 @@ export class RuntimeGame {
       status: "APPLIED",
       resolution: resolutionSnapshot(resolution),
       roundAdvanced,
+      roundResultStarted,
+      deadlineUpdated,
       gameFinalized,
+    };
+  }
+
+  completeResultAnimation(
+    player: RuntimePlayer,
+    roundNumber: number,
+    completedAt: Date,
+  ): RuntimeAnimationCompleteOutcome {
+    if (!validDate(completedAt)) {
+      throw new RuntimeGameTransitionError(
+        "Result animation completion time is invalid.",
+      );
+    }
+    if (
+      this.lifecycle !== "ROUND_RESULT" ||
+      this.resultPhase?.roundNumber !== roundNumber
+    ) {
+      return { status: "STALE", roundNumber, resultWaitStarted: false };
+    }
+
+    const phase = this.resultPhase;
+    this.playerRound(player, roundNumber);
+    if (
+      phase.animationCompleteRuntimePlayerIds.has(player.runtimePlayerId)
+    ) {
+      return {
+        status: "DUPLICATE",
+        roundNumber,
+        resultWaitStarted: false,
+        resultPhase: this.resultPhaseSnapshot(phase),
+      };
+    }
+    if (phase.state !== "ANIMATING") {
+      return { status: "STALE", roundNumber, resultWaitStarted: false };
+    }
+
+    phase.animationCompleteRuntimePlayerIds.add(player.runtimePlayerId);
+    if (
+      phase.animationCompleteRuntimePlayerIds.size < this.options.players.length
+    ) {
+      return {
+        status: "APPLIED",
+        roundNumber,
+        resultWaitStarted: false,
+        resultPhase: this.resultPhaseSnapshot(phase),
+      };
+    }
+
+    phase.state = "WAITING";
+    phase.startedAt = new Date(completedAt);
+    phase.endsAt = new Date(
+      completedAt.getTime() + this.options.resultPhaseDurationMs,
+    );
+    return {
+      status: "APPLIED",
+      roundNumber,
+      resultWaitStarted: true,
+      resultPhase: this.resultPhaseSnapshot(phase),
+    };
+  }
+
+  readyForNextRound(
+    player: RuntimePlayer,
+    roundNumber: number,
+    readyAt: Date,
+  ): RuntimeReadyOutcome {
+    if (!validDate(readyAt)) {
+      throw new RuntimeGameTransitionError("Ready time is invalid.");
+    }
+    const phase = this.activeResultWait(roundNumber);
+    this.playerRound(player, roundNumber);
+
+    if (phase.readyRuntimePlayerIds.has(player.runtimePlayerId)) {
+      return {
+        status: "DUPLICATE",
+        roundNumber,
+        readyRuntimePlayerIds: [...phase.readyRuntimePlayerIds],
+        roundAdvanced: false,
+      };
+    }
+
+    phase.readyRuntimePlayerIds.add(player.runtimePlayerId);
+    if (phase.readyRuntimePlayerIds.size < this.options.players.length) {
+      return {
+        status: "APPLIED",
+        roundNumber,
+        readyRuntimePlayerIds: [...phase.readyRuntimePlayerIds],
+        roundAdvanced: false,
+      };
+    }
+
+    const readyRuntimePlayerIds = [...phase.readyRuntimePlayerIds];
+    const nextRound = this.startNextRound(roundNumber, readyAt);
+    return {
+      status: "APPLIED",
+      roundNumber,
+      readyRuntimePlayerIds,
+      roundAdvanced: true,
+      nextRound,
+    };
+  }
+
+  advanceResultPhase(
+    roundNumber: number,
+    advancedAt: Date,
+  ): RuntimeResultAdvanceOutcome {
+    if (!validDate(advancedAt)) {
+      throw new RuntimeGameTransitionError("Result advance time is invalid.");
+    }
+    if (
+      this.lifecycle !== "ROUND_RESULT" ||
+      this.resultPhase?.roundNumber !== roundNumber ||
+      this.resultPhase.state !== "WAITING" ||
+      !this.resultPhase.endsAt
+    ) {
+      return { status: "STALE", roundAdvanced: false };
+    }
+    if (advancedAt < this.resultPhase.endsAt) {
+      throw new RuntimeGameTransitionError("The result phase is still active.");
+    }
+
+    return {
+      status: "APPLIED",
+      roundAdvanced: true,
+      nextRound: this.startNextRound(roundNumber, advancedAt),
     };
   }
 
@@ -282,6 +500,9 @@ export class RuntimeGame {
       rounds,
       currentRound:
         this.lifecycle === "ROUND_ACTIVE" ? rounds[rounds.length - 1] : undefined,
+      resultPhase: this.resultPhase
+        ? this.resultPhaseSnapshot(this.resultPhase)
+        : undefined,
       totals: Object.fromEntries(this.totals),
       completedAt: this.completedAt ? new Date(this.completedAt) : undefined,
     };
@@ -306,6 +527,36 @@ export class RuntimeGame {
     };
     this.rounds.push(round);
     return round;
+  }
+
+  private activeResultPhase(roundNumber: number) {
+    if (
+      this.options.type !== "DUEL" ||
+      this.lifecycle !== "ROUND_RESULT" ||
+      !this.resultPhase ||
+      this.resultPhase.roundNumber !== roundNumber
+    ) {
+      throw new RuntimeGameTransitionError("The round result phase is not active.");
+    }
+    return this.resultPhase;
+  }
+
+  private activeResultWait(roundNumber: number) {
+    const phase = this.activeResultPhase(roundNumber);
+    if (phase.state !== "WAITING" || !phase.startedAt || !phase.endsAt) {
+      throw new RuntimeGameTransitionError(
+        "The round result wait has not started.",
+      );
+    }
+    return phase;
+  }
+
+  private startNextRound(roundNumber: number, startedAt: Date) {
+    this.activeResultPhase(roundNumber);
+    const nextRound = this.createRound(roundNumber + 1, startedAt);
+    this.resultPhase = undefined;
+    this.lifecycle = "ROUND_ACTIVE";
+    return this.roundSnapshot(nextRound);
   }
 
   private playerRound(player: RuntimePlayer, roundNumber: number) {
@@ -350,6 +601,23 @@ export class RuntimeGame {
           ? resolutionSnapshot(playerState.resolution)
           : undefined,
       })),
+    };
+  }
+
+  private resultPhaseSnapshot(
+    resultPhase: RuntimeResultPhaseState,
+  ): RuntimeResultPhaseSnapshot {
+    return {
+      roundNumber: resultPhase.roundNumber,
+      state: resultPhase.state,
+      animationCompleteRuntimePlayerIds: [
+        ...resultPhase.animationCompleteRuntimePlayerIds,
+      ],
+      readyRuntimePlayerIds: [...resultPhase.readyRuntimePlayerIds],
+      startedAt: resultPhase.startedAt
+        ? new Date(resultPhase.startedAt)
+        : undefined,
+      endsAt: resultPhase.endsAt ? new Date(resultPhase.endsAt) : undefined,
     };
   }
 }

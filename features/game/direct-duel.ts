@@ -71,3 +71,25 @@ export async function requestDirectDuelSubmission(
     shapes,
   });
 }
+
+export async function requestDirectDuelReady(
+  duelId: string,
+  roundNumber: number,
+) {
+  return postDirectDuelAction({
+    action: "READY_NEXT_ROUND",
+    duelId,
+    roundNumber,
+  });
+}
+
+export async function requestDirectDuelResultAnimationComplete(
+  duelId: string,
+  roundNumber: number,
+) {
+  return postDirectDuelAction({
+    action: "RESULT_ANIMATION_COMPLETE",
+    duelId,
+    roundNumber,
+  });
+}
