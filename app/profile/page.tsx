@@ -3,16 +3,18 @@ import { auth } from "../../auth";
 import { ProfileView } from "../../components/profile-view";
 import { singleProfileStats } from "../../features/account/server/profile-stats";
 import { findUserById } from "../../features/account/server/users";
+import { currentRankedRatings } from "../../features/rating/server/current-ratings";
 
 export default async function ProfilePage() {
   const session = await auth();
   if (!session?.googleSub) redirect("/");
   if (!session.worldrawingUserId) redirect("/onboarding");
 
-  const [user, easyStats, realStats] = await Promise.all([
+  const [user, easyStats, realStats, rankedRatings] = await Promise.all([
     findUserById(session.worldrawingUserId),
     singleProfileStats(session.worldrawingUserId, "EASY"),
     singleProfileStats(session.worldrawingUserId, "REAL"),
+    currentRankedRatings(session.worldrawingUserId),
   ]);
   if (!user) redirect("/onboarding");
 
@@ -21,6 +23,7 @@ export default async function ProfilePage() {
       username={user.username}
       avatarId={user.avatarId}
       stats={{ EASY: easyStats, REAL: realStats }}
+      rankedRatings={rankedRatings}
     />
   );
 }

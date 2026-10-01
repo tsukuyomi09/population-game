@@ -17,9 +17,11 @@
 /data/population/
 /artifacts/population/
 /artifacts/account/tests/
+/artifacts/account/profile-tests/
 /artifacts/game/identity-tests/
 /artifacts/game/single-persistence-tests/
 /artifacts/leaderboard/tests/
+/artifacts/rating/tests/
 *.tif
 *.tiff
 *.vrt

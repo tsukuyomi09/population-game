@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   Camera,
   LogOut,
+  ShieldCheck,
   Sparkles,
   Target,
   Trash2,
@@ -24,11 +25,13 @@ import {
 } from "@/features/account/server/profile-actions";
 import type { SingleProfileStats } from "@/features/account/server/profile-stats";
 import type { GameDifficulty } from "@/features/game/single-player";
+import type { CurrentRankedRatings } from "@/features/rating/server/current-ratings";
 
 type ProfileViewProps = {
   username: string;
   avatarId: string;
   stats: Record<GameDifficulty, SingleProfileStats>;
+  rankedRatings: CurrentRankedRatings;
 };
 
 function PendingButton({
@@ -234,7 +237,12 @@ function LogoutButton({ compact = false }: { compact?: boolean }) {
   );
 }
 
-export function ProfileView({ username, avatarId, stats }: ProfileViewProps) {
+export function ProfileView({
+  username,
+  avatarId,
+  stats,
+  rankedRatings,
+}: ProfileViewProps) {
   const [difficulty, setDifficulty] = useState<GameDifficulty>("EASY");
   const selectedStats = stats[difficulty];
   const avatar = avatarDefinition(avatarId);
@@ -284,7 +292,42 @@ export function ProfileView({ username, avatarId, stats }: ProfileViewProps) {
           </div>
         </header>
 
-        <section aria-labelledby="single-stats-heading">
+        <section aria-labelledby="ranked-ratings-heading">
+          <div className="flex items-end justify-between gap-4 border-b border-border pb-5">
+            <div>
+              <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
+                Ranked
+              </p>
+              <h2 id="ranked-ratings-heading" className="mt-2 text-3xl font-black">
+                Current ratings
+              </h2>
+            </div>
+            <ShieldCheck className="size-7 text-primary" aria-hidden="true" />
+          </div>
+
+          <dl className="mt-6 grid grid-cols-2 overflow-hidden rounded-xl border border-border bg-border">
+            {(["EASY", "REAL"] as const).map((option) => {
+              const rankedRating = rankedRatings[option];
+              return (
+                <div key={option} className="bg-card px-5 py-6 text-center">
+                  <dt className="text-[0.65rem] font-bold tracking-wider text-muted-foreground uppercase">
+                    {option === "EASY" ? "Easy" : "Real"}
+                  </dt>
+                  <dd className="mt-2 font-mono text-4xl font-black">
+                    {rankedRating.rating.toLocaleString("en-US")}
+                  </dd>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {rankedRating.established
+                      ? "Current rating"
+                      : "Starting rating"}
+                  </p>
+                </div>
+              );
+            })}
+          </dl>
+        </section>
+
+        <section className="mt-10" aria-labelledby="single-stats-heading">
           <div className="flex flex-col gap-5 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
             <div>
               <p className="text-xs font-black tracking-[0.18em] text-primary uppercase">
