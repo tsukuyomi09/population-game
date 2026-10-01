@@ -19,6 +19,11 @@ ENV NODE_ENV=production \
     PORT=3000
 
 WORKDIR /app
+COPY --chown=node:node package.json package-lock.json ./
+RUN MIGRATOR_VERSION="$(node -p "require('./package-lock.json').packages['node_modules/node-pg-migrate'].version")" \
+    && npm install --global "node-pg-migrate@${MIGRATOR_VERSION}" \
+    && npm cache clean --force
+COPY --chown=node:node migrations ./migrations
 COPY --from=builder --chown=node:node /app/public ./public
 COPY --from=builder --chown=node:node /app/.next/standalone ./
 COPY --from=builder --chown=node:node /app/.next/static ./.next/static
