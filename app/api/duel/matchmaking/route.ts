@@ -20,6 +20,20 @@ function matchmakingIntent(value: unknown): MatchmakingIntent {
   return value;
 }
 
+function matchmakingAttemptId(value: unknown) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 100) {
+    throw new MatchmakingError("Matchmaking attempt is invalid.", 400);
+  }
+  return value;
+}
+
+function matchmakingDuelId(value: unknown) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 100) {
+    throw new MatchmakingError("Matchmaking Duel is invalid.", 400);
+  }
+  return value;
+}
+
 async function playerWithProfile(
   player: Awaited<ReturnType<typeof currentRuntimePlayer>>,
 ) {
@@ -66,7 +80,18 @@ export async function POST(request: Request) {
     }
 
     if (body.action === "LEAVE") {
-      return Response.json(matchmaking().leave(player));
+      return Response.json(
+        matchmaking().leave(player, matchmakingAttemptId(body.attemptId)),
+      );
+    }
+
+    if (body.action === "ACK_MATCH") {
+      matchmaking().acknowledgeMatch(
+        player,
+        matchmakingAttemptId(body.attemptId),
+        matchmakingDuelId(body.duelId),
+      );
+      return Response.json({ status: "ACKNOWLEDGED" });
     }
 
     throw new MatchmakingError("Unknown matchmaking action.", 400);
@@ -78,6 +103,9 @@ export async function POST(request: Request) {
 export async function GET(request: Request) {
   try {
     const player = await currentRuntimePlayer(request);
+    const attemptId = matchmakingAttemptId(
+      new URL(request.url).searchParams.get("attemptId"),
+    );
     const encoder = new TextEncoder();
     const pendingEvents: MatchmakingEvent[] = [];
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
@@ -95,7 +123,7 @@ export async function GET(request: Request) {
         cleanup();
       }
     };
-    const unsubscribe = matchmaking().subscribe(player, send);
+    const unsubscribe = matchmaking().subscribe(player, attemptId, send);
     const cleanup = () => {
       if (closed) return;
       closed = true;

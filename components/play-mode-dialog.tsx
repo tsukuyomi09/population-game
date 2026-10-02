@@ -23,10 +23,13 @@ import { requestDirectDuelInviteCreate } from "@/features/game/direct-duel";
 import {
   requestMatchmakingJoin,
   requestMatchmakingLeave,
+  requestMatchmakingMatchAcknowledge,
 } from "@/features/game/matchmaking";
 import type {
   MatchmakingEvent,
   MatchmakingIntent,
+  MatchmakingMatch,
+  MatchmakingWaiting,
 } from "@/features/game/server/matchmaking-service";
 import type { GameDifficulty } from "@/features/game/single-player";
 
@@ -61,50 +64,78 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
     useState<GameDifficulty>("EASY");
   const [isCreatingInvite, setIsCreatingInvite] = useState(false);
   const [isJoiningQueue, setIsJoiningQueue] = useState(false);
-  const [queuedIntent, setQueuedIntent] =
-    useState<MatchmakingIntent | null>(null);
+  const [queuedAttempt, setQueuedAttempt] =
+    useState<MatchmakingWaiting | null>(null);
+  const queuedAttemptRef = useRef<MatchmakingWaiting | null>(null);
+  const transitioningAttemptRef = useRef<string | null>(null);
+  const queuedIntent = queuedAttempt?.intent ?? null;
   const [inviteError, setInviteError] = useState<string | null>(null);
 
-  const enterMatch = (duelId: string) => {
+  const enterMatch = async (match: MatchmakingMatch) => {
+    if (transitioningAttemptRef.current) return;
+    transitioningAttemptRef.current = match.attemptId;
+
+    try {
+      await requestMatchmakingMatchAcknowledge(match.attemptId, match.duelId);
+    } catch (error) {
+      transitioningAttemptRef.current = null;
+      setInviteError(
+        error instanceof Error
+          ? error.message
+          : "Could not confirm the matchmaking result.",
+      );
+      return;
+    }
+
+    if (queuedAttemptRef.current?.attemptId === match.attemptId) {
+      queuedAttemptRef.current = null;
+      setQueuedAttempt(null);
+    }
     dialogRef.current?.close();
     router.push(
-      `/game?duelId=${encodeURIComponent(duelId)}` +
-        `&difficulty=${duelDifficulty}`,
+      `/game?duelId=${encodeURIComponent(match.duelId)}` +
+        `&difficulty=${match.difficulty}`,
     );
   };
 
   useEffect(() => {
-    if (!queuedIntent) return;
+    if (!queuedAttempt) return;
 
-    const source = new EventSource("/api/duel/matchmaking");
+    const source = new EventSource(
+      `/api/duel/matchmaking?attemptId=${encodeURIComponent(queuedAttempt.attemptId)}`,
+    );
     source.onmessage = (message) => {
       const event = JSON.parse(message.data) as MatchmakingEvent;
+      if (event.attemptId !== queuedAttemptRef.current?.attemptId) return;
       if (event.status === "MATCHED") {
-        setQueuedIntent(null);
-        enterMatch(event.duelId);
+        void enterMatch(event);
       } else if (event.status === "LEFT") {
-        setQueuedIntent(null);
+        queuedAttemptRef.current = null;
+        setQueuedAttempt(null);
         setInviteError("Matchmaking stopped. Join the queue to try again.");
       }
     };
     source.onerror = () => {
-      setInviteError("Matchmaking connection lost. Reconnecting…");
+      if (queuedAttemptRef.current?.attemptId === queuedAttempt.attemptId) {
+        setInviteError("Matchmaking connection lost. Reconnecting…");
+      }
     };
 
     return () => source.close();
-  }, [queuedIntent]);
+  }, [queuedAttempt]);
 
   const findPlayer = async (intent: MatchmakingIntent) => {
-    if (isJoiningQueue || queuedIntent) return;
+    if (isJoiningQueue || queuedAttemptRef.current) return;
 
     setIsJoiningQueue(true);
     setInviteError(null);
     try {
       const state = await requestMatchmakingJoin(intent, duelDifficulty);
       if (state.status === "MATCHED") {
-        enterMatch(state.duelId);
+        await enterMatch(state);
       } else {
-        setQueuedIntent(intent);
+        queuedAttemptRef.current = state;
+        setQueuedAttempt(state);
       }
     } catch (error) {
       setInviteError(
@@ -116,18 +147,22 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
   };
 
   const cancelMatchmaking = async () => {
-    if (!queuedIntent) return;
+    const attempt = queuedAttemptRef.current;
+    if (!attempt) return;
 
     try {
-      const state = await requestMatchmakingLeave();
+      const state = await requestMatchmakingLeave(attempt.attemptId);
       if (state.status === "MATCHED") {
-        enterMatch(state.duelId);
+        await enterMatch(state);
         return;
       }
     } catch {
       // Closing the EventSource also removes an unmatched queue entry server-side.
     }
-    setQueuedIntent(null);
+    if (queuedAttemptRef.current?.attemptId === attempt.attemptId) {
+      queuedAttemptRef.current = null;
+      setQueuedAttempt(null);
+    }
   };
 
   const createInvite = async (intent: MatchmakingIntent) => {
@@ -339,7 +374,7 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
                   <h3 className="mt-4 text-2xl font-black">Finding a player</h3>
                   <p className="mt-2 text-sm text-muted-foreground">
                     {queuedIntent === "RANKED" ? "Ranked" : "1v1"} · {" "}
-                    {duelDifficulty === "EASY" ? "Easy" : "Real"}
+                    {queuedAttempt?.difficulty === "EASY" ? "Easy" : "Real"}
                   </p>
                   <p className="mx-auto mt-3 max-w-sm text-xs leading-5 text-muted-foreground">
                     {queuedIntent === "RANKED"

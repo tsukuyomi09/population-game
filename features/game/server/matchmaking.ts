@@ -5,7 +5,7 @@ import {
 } from "./direct-duels";
 import { MatchmakingService } from "./matchmaking-service";
 
-const MATCHMAKING_API_VERSION = DIRECT_DUEL_API_VERSION + 1;
+const MATCHMAKING_API_VERSION = DIRECT_DUEL_API_VERSION + 2;
 
 const globalForMatchmaking = globalThis as typeof globalThis & {
   worldrawingMatchmaking?: MatchmakingService;

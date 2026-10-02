@@ -10,6 +10,7 @@ import {
   MatchmakingService,
   rankedMatchmakingRange,
   type MatchmakingEvent,
+  type MatchmakingState,
 } from "./matchmaking-service";
 
 function guest(id: string): GuestRuntimePlayer {
@@ -87,24 +88,24 @@ class FakeClock {
   }
 }
 
+function waiting(state: MatchmakingState) {
+  assert.equal(state.status, "WAITING");
+  if (state.status !== "WAITING") throw new Error("Expected WAITING state.");
+  return state;
+}
+
 test("guest and registered players pair once in the unrated queue", () => {
   const duels = new FakeDuelFactory();
   const service = new MatchmakingService(duels.create);
   const first = guest("guest-a");
   const second = registered("member-b");
 
-  assert.deepEqual(service.join(first, "DUEL", "EASY"), {
-    status: "WAITING",
-    intent: "DUEL",
-    difficulty: "EASY",
-  });
-  assert.deepEqual(service.join(second, "DUEL", "EASY"), {
-    status: "MATCHED",
-    duelId: "duel-1",
-    intent: "DUEL",
-    difficulty: "EASY",
-    rated: false,
-  });
+  const firstAttempt = waiting(service.join(first, "DUEL", "EASY"));
+  const secondMatch = service.join(second, "DUEL", "EASY");
+  assert.equal(secondMatch.status, "MATCHED");
+  assert.equal(secondMatch.status === "MATCHED" && secondMatch.duelId, "duel-1");
+  assert.equal(firstAttempt.intent, "DUEL");
+  assert.equal(firstAttempt.difficulty, "EASY");
   assert.equal(duels.matches.length, 1);
   assert.equal(duels.matches[0]?.rated, false);
 
@@ -168,15 +169,24 @@ test("leaving or losing the queue subscription removes the entry", () => {
   const canceled = guest("canceled");
   const disconnected = guest("disconnected");
 
-  service.join(canceled, "DUEL", "EASY");
-  assert.deepEqual(service.leave(canceled), { status: "LEFT" });
+  const canceledAttempt = waiting(service.join(canceled, "DUEL", "EASY"));
+  assert.deepEqual(service.leave(canceled, canceledAttempt.attemptId), {
+    status: "LEFT",
+    attemptId: canceledAttempt.attemptId,
+  });
   assert.equal(
     service.join(guest("replacement"), "DUEL", "EASY").status,
     "WAITING",
   );
 
-  service.join(disconnected, "DUEL", "REAL");
-  const unsubscribe = service.subscribe(disconnected, () => undefined);
+  const disconnectedAttempt = waiting(
+    service.join(disconnected, "DUEL", "REAL"),
+  );
+  const unsubscribe = service.subscribe(
+    disconnected,
+    disconnectedAttempt.attemptId,
+    () => undefined,
+  );
   unsubscribe();
   assert.equal(
     service.join(guest("real-replacement"), "DUEL", "REAL").status,
@@ -191,13 +201,18 @@ test("a waiting player receives one match even when subscribing after pairing", 
   const first = guest("first");
   const events: MatchmakingEvent[] = [];
 
-  service.join(first, "DUEL", "EASY");
+  const firstAttempt = waiting(service.join(first, "DUEL", "EASY"));
   service.join(guest("second"), "DUEL", "EASY");
-  const unsubscribe = service.subscribe(first, (event) => events.push(event));
+  const unsubscribe = service.subscribe(
+    first,
+    firstAttempt.attemptId,
+    (event) => events.push(event),
+  );
 
   assert.deepEqual(events, [
     {
       status: "MATCHED",
+      attemptId: firstAttempt.attemptId,
       duelId: "duel-1",
       intent: "DUEL",
       difficulty: "EASY",
@@ -227,11 +242,13 @@ test("cancel racing a completed pairing returns that match and clears pending st
   const service = new MatchmakingService(duels.create);
   const first = guest("first");
 
-  service.join(first, "DUEL", "EASY");
+  const attempt = waiting(service.join(first, "DUEL", "EASY"));
   service.join(guest("second"), "DUEL", "EASY");
-  const leave = service.leave(first);
+  const leave = service.leave(first, attempt.attemptId);
 
   assert.equal(leave.status, "MATCHED");
+  if (leave.status !== "MATCHED") throw new Error("Expected MATCHED state.");
+  service.acknowledgeMatch(first, leave.attemptId, leave.duelId);
   assert.equal(service.join(first, "DUEL", "REAL").status, "WAITING");
   assert.equal(duels.matches.length, 1);
 });
@@ -256,8 +273,8 @@ test("waiting Ranked players are paired when a timer widens both ranges", () => 
   const first = registered("first");
   const events: MatchmakingEvent[] = [];
 
-  assert.equal(service.join(first, "RANKED", "EASY", 1_000).status, "WAITING");
-  service.subscribe(first, (event) => events.push(event));
+  const firstAttempt = waiting(service.join(first, "RANKED", "EASY", 1_000));
+  service.subscribe(first, firstAttempt.attemptId, (event) => events.push(event));
   assert.equal(
     service.join(registered("second"), "RANKED", "EASY", 1_100).status,
     "WAITING",
@@ -388,16 +405,27 @@ test("Ranked cancellation and disconnect cleanup remove timed queue entries", ()
   const canceled = registered("canceled");
   const disconnected = registered("disconnected");
 
-  service.join(canceled, "RANKED", "EASY", 1_000);
-  assert.deepEqual(service.leave(canceled), { status: "LEFT" });
+  const canceledAttempt = waiting(
+    service.join(canceled, "RANKED", "EASY", 1_000),
+  );
+  assert.deepEqual(service.leave(canceled, canceledAttempt.attemptId), {
+    status: "LEFT",
+    attemptId: canceledAttempt.attemptId,
+  });
   assert.equal(
     service.join(registered("easy-replacement"), "RANKED", "EASY", 1_000)
       .status,
     "WAITING",
   );
 
-  service.join(disconnected, "RANKED", "REAL", 1_000);
-  const unsubscribe = service.subscribe(disconnected, () => undefined);
+  const disconnectedAttempt = waiting(
+    service.join(disconnected, "RANKED", "REAL", 1_000),
+  );
+  const unsubscribe = service.subscribe(
+    disconnected,
+    disconnectedAttempt.attemptId,
+    () => undefined,
+  );
   unsubscribe();
   assert.equal(
     service.join(registered("real-replacement"), "RANKED", "REAL", 1_000)
@@ -409,6 +437,206 @@ test("Ranked cancellation and disconnect cleanup remove timed queue entries", ()
   assert.equal(duels.matches.length, 0);
 });
 
+test("stale leave and disconnect cleanup cannot remove a newer queue attempt", () => {
+  const duels = new FakeDuelFactory();
+  const service = new MatchmakingService(duels.create);
+  const player = registered("churning");
+
+  const oldAttempt = waiting(
+    service.join(player, "RANKED", "EASY", 1_000),
+  );
+  const disconnectOldAttempt = service.subscribe(
+    player,
+    oldAttempt.attemptId,
+    () => undefined,
+  );
+  service.leave(player, oldAttempt.attemptId);
+
+  const currentAttempt = waiting(
+    service.join(player, "RANKED", "REAL", 1_000),
+  );
+  disconnectOldAttempt();
+  assert.deepEqual(service.leave(player, oldAttempt.attemptId), {
+    status: "LEFT",
+    attemptId: oldAttempt.attemptId,
+  });
+
+  const duplicateJoin = waiting(
+    service.join(player, "RANKED", "REAL", 1_000),
+  );
+  assert.equal(duplicateJoin.attemptId, currentAttempt.attemptId);
+
+  const opponentMatch = service.join(
+    registered("opponent"),
+    "RANKED",
+    "REAL",
+    1_000,
+  );
+  assert.equal(opponentMatch.status, "MATCHED");
+  assert.equal(duels.matches.length, 1);
+});
+
+test("a match is delivered only to its queue attempt and remains until acknowledged", () => {
+  const duels = new FakeDuelFactory();
+  const service = new MatchmakingService(duels.create);
+  const first = registered("first");
+  const oldEvents: MatchmakingEvent[] = [];
+  const currentEvents: MatchmakingEvent[] = [];
+
+  const oldAttempt = waiting(
+    service.join(first, "RANKED", "EASY", 1_000),
+  );
+  service.subscribe(first, oldAttempt.attemptId, (event) => {
+    oldEvents.push(event);
+  });
+  service.leave(first, oldAttempt.attemptId);
+
+  const currentAttempt = waiting(
+    service.join(first, "RANKED", "REAL", 1_000),
+  );
+  const secondMatch = service.join(
+    registered("second"),
+    "RANKED",
+    "REAL",
+    1_000,
+  );
+  assert.equal(secondMatch.status, "MATCHED");
+  if (secondMatch.status !== "MATCHED") {
+    throw new Error("Expected MATCHED state.");
+  }
+  assert.equal(
+    oldEvents.filter((event) => event.status === "MATCHED").length,
+    0,
+  );
+
+  const disconnectCurrent = service.subscribe(
+    first,
+    currentAttempt.attemptId,
+    (event) => currentEvents.push(event),
+  );
+  assert.equal(currentEvents.length, 1);
+  assert.equal(currentEvents[0]?.status, "MATCHED");
+  assert.equal(
+    currentEvents[0]?.status === "MATCHED" && currentEvents[0].duelId,
+    secondMatch.duelId,
+  );
+
+  disconnectCurrent();
+  const redelivered: MatchmakingEvent[] = [];
+  service.subscribe(first, currentAttempt.attemptId, (event) => {
+    redelivered.push(event);
+  });
+  assert.equal(redelivered[0]?.status, "MATCHED");
+
+  service.acknowledgeMatch(
+    first,
+    currentAttempt.attemptId,
+    secondMatch.duelId,
+  );
+  const afterAcknowledgement: MatchmakingEvent[] = [];
+  service.subscribe(first, currentAttempt.attemptId, (event) => {
+    afterAcknowledgement.push(event);
+  });
+  assert.deepEqual(afterAcknowledgement, [
+    { status: "LEFT", attemptId: currentAttempt.attemptId },
+  ]);
+});
+
+test("repeated Ranked join cancel switch and delayed cleanup still pairs both players once", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, clock);
+  const first = registered("first");
+  const second = registered("second");
+
+  for (let cycle = 0; cycle < 50; cycle += 1) {
+    const firstOld = waiting(
+      service.join(first, "RANKED", "EASY", 1_000),
+    );
+    const secondOld = waiting(
+      service.join(second, "RANKED", "REAL", 1_000),
+    );
+    const disconnectFirstOld = service.subscribe(
+      first,
+      firstOld.attemptId,
+      () => undefined,
+    );
+    const disconnectSecondOld = service.subscribe(
+      second,
+      secondOld.attemptId,
+      () => undefined,
+    );
+    service.leave(first, firstOld.attemptId);
+    service.leave(second, secondOld.attemptId);
+
+    const firstCurrent = waiting(
+      service.join(first, "RANKED", "REAL", 1_000),
+    );
+    const secondCurrent = waiting(
+      service.join(second, "RANKED", "EASY", 1_000),
+    );
+    disconnectFirstOld();
+    disconnectSecondOld();
+    service.leave(first, firstOld.attemptId);
+    service.leave(second, secondOld.attemptId);
+
+    assert.equal(
+      waiting(service.join(first, "RANKED", "REAL", 1_000)).attemptId,
+      firstCurrent.attemptId,
+    );
+    assert.equal(
+      waiting(service.join(second, "RANKED", "EASY", 1_000)).attemptId,
+      secondCurrent.attemptId,
+    );
+    service.leave(first, firstCurrent.attemptId);
+    service.leave(second, secondCurrent.attemptId);
+  }
+
+  const firstAttempt = waiting(
+    service.join(first, "RANKED", "EASY", 1_000),
+  );
+  const firstEvents: MatchmakingEvent[] = [];
+  service.subscribe(first, firstAttempt.attemptId, (event) => {
+    firstEvents.push(event);
+  });
+  const secondMatch = service.join(second, "RANKED", "EASY", 1_025);
+  assert.equal(secondMatch.status, "MATCHED");
+  if (secondMatch.status !== "MATCHED") {
+    throw new Error("Expected MATCHED state.");
+  }
+  const secondEvents: MatchmakingEvent[] = [];
+  service.subscribe(second, secondMatch.attemptId, (event) => {
+    secondEvents.push(event);
+  });
+
+  const firstMatches = firstEvents.filter(
+    (event): event is Extract<MatchmakingEvent, { status: "MATCHED" }> =>
+      event.status === "MATCHED",
+  );
+  const secondMatches = secondEvents.filter(
+    (event): event is Extract<MatchmakingEvent, { status: "MATCHED" }> =>
+      event.status === "MATCHED",
+  );
+  assert.equal(firstMatches.length, 1);
+  assert.equal(secondMatches.length, 1);
+  assert.equal(firstMatches[0]?.duelId, secondMatches[0]?.duelId);
+  assert.equal(firstMatches[0]?.duelId, secondMatch.duelId);
+  assert.equal(duels.matches.length, 1);
+
+  service.acknowledgeMatch(
+    first,
+    firstAttempt.attemptId,
+    secondMatch.duelId,
+  );
+  service.acknowledgeMatch(
+    second,
+    secondMatch.attemptId,
+    secondMatch.duelId,
+  );
+  clock.advanceTo(120_000);
+  assert.equal(duels.matches.length, 1);
+});
+
 test("hidden MMR never appears in public matchmaking states or events", () => {
   const duels = new FakeDuelFactory();
   const service = new MatchmakingService(duels.create);
@@ -416,7 +644,13 @@ test("hidden MMR never appears in public matchmaking states or events", () => {
   const events: MatchmakingEvent[] = [];
 
   const waiting = service.join(player, "RANKED", "EASY", 1_234);
-  const unsubscribe = service.subscribe(player, (event) => events.push(event));
+  assert.equal(waiting.status, "WAITING");
+  if (waiting.status !== "WAITING") throw new Error("Expected WAITING state.");
+  const unsubscribe = service.subscribe(
+    player,
+    waiting.attemptId,
+    (event) => events.push(event),
+  );
 
   assert.doesNotMatch(JSON.stringify(waiting), /mmr|1234/i);
   assert.doesNotMatch(JSON.stringify(events), /mmr|1234/i);

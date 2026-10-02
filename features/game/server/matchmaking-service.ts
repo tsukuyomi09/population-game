@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { RuntimePlayer } from "../runtime-player";
 import type { GameDifficulty } from "../single-player";
 
@@ -5,6 +6,7 @@ export type MatchmakingIntent = "DUEL" | "RANKED";
 
 export type MatchmakingMatch = {
   status: "MATCHED";
+  attemptId: string;
   duelId: string;
   intent: MatchmakingIntent;
   difficulty: GameDifficulty;
@@ -13,15 +15,19 @@ export type MatchmakingMatch = {
 
 export type MatchmakingWaiting = {
   status: "WAITING";
+  attemptId: string;
   intent: MatchmakingIntent;
   difficulty: GameDifficulty;
 };
 
 export type MatchmakingState = MatchmakingMatch | MatchmakingWaiting;
 
-export type MatchmakingEvent = MatchmakingState | { status: "LEFT" };
+export type MatchmakingEvent =
+  | MatchmakingState
+  | { status: "LEFT"; attemptId: string };
 
 type QueueEntry = {
+  attemptId: string;
   player: RuntimePlayer;
   intent: MatchmakingIntent;
   difficulty: GameDifficulty;
@@ -85,7 +91,7 @@ export class MatchmakingService {
   private readonly pendingMatches = new Map<string, MatchmakingMatch>();
   private readonly listeners = new Map<
     string,
-    Set<(event: MatchmakingEvent) => void>
+    Map<string, Set<(event: MatchmakingEvent) => void>>
   >();
   private readonly rankedReevaluationTimers = new Map<
     string,
@@ -134,7 +140,12 @@ export class MatchmakingService {
         existing.intent === intent &&
         existing.difficulty === difficulty
       ) {
-        return { status: "WAITING", intent, difficulty };
+        return {
+          status: "WAITING",
+          attemptId: existing.attemptId,
+          intent,
+          difficulty,
+        };
       }
       throw new MatchmakingError(
         "Leave the current matchmaking queue before joining another.",
@@ -152,6 +163,7 @@ export class MatchmakingService {
     const key = queueKey(intent, difficulty);
     const queue = this.queues.get(key) ?? [];
     const entry: QueueEntry = {
+      attemptId: randomUUID(),
       player,
       intent,
       difficulty,
@@ -168,10 +180,14 @@ export class MatchmakingService {
 
       const match = this.pendingMatches.get(player.runtimePlayerId);
       if (match) {
-        this.pendingMatches.delete(player.runtimePlayerId);
         return match;
       }
-      return { status: "WAITING", intent, difficulty };
+      return {
+        status: "WAITING",
+        attemptId: entry.attemptId,
+        intent,
+        difficulty,
+      };
     }
 
     const opponent = queue.shift();
@@ -180,7 +196,12 @@ export class MatchmakingService {
       queue.push(entry);
       this.queues.set(key, queue);
       this.entriesByPlayer.set(player.runtimePlayerId, entry);
-      return { status: "WAITING", intent, difficulty };
+      return {
+        status: "WAITING",
+        attemptId: entry.attemptId,
+        intent,
+        difficulty,
+      };
     }
 
     this.entriesByPlayer.delete(opponent.player.runtimePlayerId);
@@ -201,66 +222,98 @@ export class MatchmakingService {
       throw error;
     }
 
-    const match: MatchmakingMatch = {
+    const opponentMatch: MatchmakingMatch = {
       status: "MATCHED",
+      attemptId: opponent.attemptId,
       duelId: created.duelId,
       intent,
       difficulty,
       rated: created.rated,
     };
-    this.pendingMatches.set(opponent.player.runtimePlayerId, match);
-    this.emit(opponent.player.runtimePlayerId, match);
+    const playerMatch: MatchmakingMatch = {
+      ...opponentMatch,
+      attemptId: entry.attemptId,
+    };
+    this.pendingMatches.set(opponent.player.runtimePlayerId, opponentMatch);
+    this.pendingMatches.set(player.runtimePlayerId, playerMatch);
+    this.emit(
+      opponent.player.runtimePlayerId,
+      opponent.attemptId,
+      opponentMatch,
+    );
 
-    return match;
+    return playerMatch;
   }
 
-  leave(player: RuntimePlayer): MatchmakingEvent {
+  leave(player: RuntimePlayer, attemptId: string): MatchmakingEvent {
     const match = this.pendingMatches.get(player.runtimePlayerId);
-    if (match) {
-      this.pendingMatches.delete(player.runtimePlayerId);
-      return match;
-    }
+    if (match?.attemptId === attemptId) return match;
 
     const entry = this.entriesByPlayer.get(player.runtimePlayerId);
-    if (!entry) return { status: "LEFT" };
+    if (entry?.attemptId !== attemptId) return { status: "LEFT", attemptId };
 
     this.removeEntry(entry);
-    this.emit(player.runtimePlayerId, { status: "LEFT" });
-    return { status: "LEFT" };
+    const event: MatchmakingEvent = { status: "LEFT", attemptId };
+    this.emit(player.runtimePlayerId, attemptId, event);
+    return event;
+  }
+
+  acknowledgeMatch(
+    player: RuntimePlayer,
+    attemptId: string,
+    duelId: string,
+  ) {
+    const match = this.pendingMatches.get(player.runtimePlayerId);
+    if (!match || match.attemptId !== attemptId) return;
+    if (match.duelId !== duelId) {
+      throw new MatchmakingError("Matchmaking result does not match.", 409);
+    }
+    this.pendingMatches.delete(player.runtimePlayerId);
   }
 
   subscribe(
     player: RuntimePlayer,
+    attemptId: string,
     listener: (event: MatchmakingEvent) => void,
   ) {
-    let playerListeners = this.listeners.get(player.runtimePlayerId);
+    let attempts = this.listeners.get(player.runtimePlayerId);
+    if (!attempts) {
+      attempts = new Map();
+      this.listeners.set(player.runtimePlayerId, attempts);
+    }
+    let playerListeners = attempts.get(attemptId);
     if (!playerListeners) {
       playerListeners = new Set();
-      this.listeners.set(player.runtimePlayerId, playerListeners);
+      attempts.set(attemptId, playerListeners);
     }
     playerListeners.add(listener);
 
     const pendingMatch = this.pendingMatches.get(player.runtimePlayerId);
     const entry = this.entriesByPlayer.get(player.runtimePlayerId);
-    if (pendingMatch) {
+    if (pendingMatch?.attemptId === attemptId) {
       listener(pendingMatch);
-      this.pendingMatches.delete(player.runtimePlayerId);
-    } else if (entry) {
+    } else if (entry?.attemptId === attemptId) {
       listener({
         status: "WAITING",
+        attemptId,
         intent: entry.intent,
         difficulty: entry.difficulty,
       });
     } else {
-      listener({ status: "LEFT" });
+      listener({ status: "LEFT", attemptId });
     }
 
     return () => {
       playerListeners?.delete(listener);
       if (playerListeners?.size === 0) {
-        this.listeners.delete(player.runtimePlayerId);
+        attempts?.delete(attemptId);
+        if (attempts?.size === 0) {
+          this.listeners.delete(player.runtimePlayerId);
+        }
         const queuedEntry = this.entriesByPlayer.get(player.runtimePlayerId);
-        if (queuedEntry) this.removeEntry(queuedEntry);
+        if (queuedEntry?.attemptId === attemptId) {
+          this.removeEntry(queuedEntry);
+        }
       }
     };
   }
@@ -273,7 +326,9 @@ export class MatchmakingService {
       if (index >= 0) queue.splice(index, 1);
       if (queue.length === 0) this.queues.delete(key);
     }
-    this.entriesByPlayer.delete(entry.player.runtimePlayerId);
+    if (this.entriesByPlayer.get(entry.player.runtimePlayerId) === entry) {
+      this.entriesByPlayer.delete(entry.player.runtimePlayerId);
+    }
     if (entry.intent === "RANKED") {
       this.scheduleRankedReevaluation(key);
     }
@@ -362,16 +417,17 @@ export class MatchmakingService {
       throw error;
     }
 
-    const match: MatchmakingMatch = {
-      status: "MATCHED",
-      duelId: created.duelId,
-      intent: "RANKED",
-      difficulty: pair.first.difficulty,
-      rated: created.rated,
-    };
     for (const entry of [pair.first, pair.second]) {
+      const match: MatchmakingMatch = {
+        status: "MATCHED",
+        attemptId: entry.attemptId,
+        duelId: created.duelId,
+        intent: "RANKED",
+        difficulty: pair.first.difficulty,
+        rated: created.rated,
+      };
       this.pendingMatches.set(entry.player.runtimePlayerId, match);
-      this.emit(entry.player.runtimePlayerId, match);
+      this.emit(entry.player.runtimePlayerId, entry.attemptId, match);
     }
   }
 
@@ -379,7 +435,9 @@ export class MatchmakingService {
     for (const entry of [pair.first, pair.second]) {
       const index = queue.indexOf(entry);
       if (index >= 0) queue.splice(index, 1);
-      this.entriesByPlayer.delete(entry.player.runtimePlayerId);
+      if (this.entriesByPlayer.get(entry.player.runtimePlayerId) === entry) {
+        this.entriesByPlayer.delete(entry.player.runtimePlayerId);
+      }
     }
   }
 
@@ -418,13 +476,14 @@ export class MatchmakingService {
     this.rankedReevaluationTimers.delete(key);
   }
 
-  private emit(runtimePlayerId: string, event: MatchmakingEvent) {
-    const listeners = this.listeners.get(runtimePlayerId);
+  private emit(
+    runtimePlayerId: string,
+    attemptId: string,
+    event: MatchmakingEvent,
+  ) {
+    const listeners = this.listeners.get(runtimePlayerId)?.get(attemptId);
     for (const listener of listeners ?? []) {
       listener(event);
-    }
-    if (event.status === "MATCHED" && listeners?.size) {
-      this.pendingMatches.delete(runtimePlayerId);
     }
   }
 }

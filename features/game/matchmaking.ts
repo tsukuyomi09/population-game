@@ -35,8 +35,20 @@ export async function requestMatchmakingJoin(
   })) as MatchmakingState;
 }
 
-export async function requestMatchmakingLeave() {
+export async function requestMatchmakingLeave(attemptId: string) {
   return (await postMatchmakingAction({
     action: "LEAVE",
+    attemptId,
   })) as MatchmakingEvent;
+}
+
+export async function requestMatchmakingMatchAcknowledge(
+  attemptId: string,
+  duelId: string,
+) {
+  await postMatchmakingAction({
+    action: "ACK_MATCH",
+    attemptId,
+    duelId,
+  });
 }
