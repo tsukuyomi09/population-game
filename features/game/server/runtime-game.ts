@@ -51,6 +51,7 @@ export type RuntimeGameSnapshot = {
   currentRound?: RuntimeRoundSnapshot;
   resultPhase?: RuntimeResultPhaseSnapshot;
   abandonment?: RuntimeAbandonmentSnapshot;
+  disconnectCompletion?: RuntimeDisconnectCompletionSnapshot;
   totals: Record<string, number>;
   completedAt?: Date;
 };
@@ -59,6 +60,13 @@ export type RuntimeAbandonmentSnapshot = {
   abandonedRuntimePlayerId: string;
   winnerRuntimePlayerId: string;
   abandonedAt: Date;
+};
+
+export type RuntimeDisconnectCompletionSnapshot = {
+  outcome: "FORFEIT";
+  winnerRuntimePlayerId: string;
+  forfeitedRuntimePlayerId: string;
+  completedAt: Date;
 };
 
 export type RuntimeResultPhaseSnapshot = {
@@ -91,6 +99,11 @@ export type RuntimeResultAdvanceOutcome = {
   status: "APPLIED" | "STALE";
   roundAdvanced: boolean;
   nextRound?: RuntimeRoundSnapshot;
+};
+
+export type RuntimeDisconnectForfeitOutcome = {
+  status: "APPLIED" | "DUPLICATE" | "STALE";
+  disconnectCompletion?: RuntimeDisconnectCompletionSnapshot;
 };
 
 export type RuntimeAnimationCompleteOutcome = {
@@ -143,6 +156,13 @@ type RuntimeAbandonmentState = {
   abandonedAt: Date;
 };
 
+type RuntimeDisconnectCompletionState = {
+  outcome: "FORFEIT";
+  winnerRuntimePlayerId: string;
+  forfeitedRuntimePlayerId: string;
+  completedAt: Date;
+};
+
 type RuntimeGameOptions = {
   runtimeGameId: string;
   type: RuntimeGameType;
@@ -191,6 +211,7 @@ export class RuntimeGame {
   private readonly totals = new Map<string, number>();
   private resultPhase?: RuntimeResultPhaseState;
   private abandonment?: RuntimeAbandonmentState;
+  private disconnectCompletion?: RuntimeDisconnectCompletionState;
   private completedAt?: Date;
 
   constructor(private readonly options: RuntimeGameOptions) {
@@ -556,6 +577,61 @@ export class RuntimeGame {
     };
   }
 
+  forfeitDisconnectedPlayer(
+    player: RuntimePlayer,
+    completedAt: Date,
+  ): RuntimeDisconnectForfeitOutcome {
+    if (this.options.type !== "DUEL") {
+      throw new RuntimeGameTransitionError("Only a Duel can end by disconnect.");
+    }
+    if (!validDate(completedAt)) {
+      throw new RuntimeGameTransitionError("Disconnect time is invalid.");
+    }
+    const forfeitedPlayer = this.gamePlayer(player);
+
+    if (this.lifecycle === "COMPLETE") {
+      return this.disconnectCompletion
+        ? {
+            status: "DUPLICATE",
+            disconnectCompletion: this.disconnectCompletionSnapshot(
+              this.disconnectCompletion,
+            ),
+          }
+        : { status: "STALE" };
+    }
+    if (
+      this.lifecycle !== "ROUND_ACTIVE" &&
+      this.lifecycle !== "ROUND_RESULT"
+    ) {
+      throw new RuntimeGameTransitionError("The Duel has not started.");
+    }
+
+    const winner = this.options.players.find(
+      (candidate) =>
+        candidate.runtimePlayerId !== forfeitedPlayer.runtimePlayerId,
+    );
+    if (!winner) {
+      throw new RuntimeGameTransitionError("The Duel opponent was not found.");
+    }
+
+    this.disconnectCompletion = {
+      outcome: "FORFEIT",
+      winnerRuntimePlayerId: winner.runtimePlayerId,
+      forfeitedRuntimePlayerId: forfeitedPlayer.runtimePlayerId,
+      completedAt: new Date(completedAt),
+    };
+    this.lifecycle = "COMPLETE";
+    this.completedAt = new Date(completedAt);
+    this.resultPhase = undefined;
+
+    return {
+      status: "APPLIED",
+      disconnectCompletion: this.disconnectCompletionSnapshot(
+        this.disconnectCompletion,
+      ),
+    };
+  }
+
   snapshot(): RuntimeGameSnapshot {
     const rounds = this.rounds.map((round) => this.roundSnapshot(round));
     return {
@@ -571,6 +647,9 @@ export class RuntimeGame {
         : undefined,
       abandonment: this.abandonment
         ? this.abandonmentSnapshot(this.abandonment)
+        : undefined,
+      disconnectCompletion: this.disconnectCompletion
+        ? this.disconnectCompletionSnapshot(this.disconnectCompletion)
         : undefined,
       totals: Object.fromEntries(this.totals),
       completedAt: this.completedAt ? new Date(this.completedAt) : undefined,
@@ -707,6 +786,17 @@ export class RuntimeGame {
       abandonedRuntimePlayerId: abandonment.abandonedRuntimePlayerId,
       winnerRuntimePlayerId: abandonment.winnerRuntimePlayerId,
       abandonedAt: new Date(abandonment.abandonedAt),
+    };
+  }
+
+  private disconnectCompletionSnapshot(
+    completion: RuntimeDisconnectCompletionState,
+  ): RuntimeDisconnectCompletionSnapshot {
+    return {
+      outcome: completion.outcome,
+      winnerRuntimePlayerId: completion.winnerRuntimePlayerId,
+      forfeitedRuntimePlayerId: completion.forfeitedRuntimePlayerId,
+      completedAt: new Date(completion.completedAt),
     };
   }
 }

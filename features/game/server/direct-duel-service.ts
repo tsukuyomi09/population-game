@@ -8,6 +8,7 @@ import type { GameDifficulty, SubmissionType } from "../single-player";
 import {
   RuntimeGame,
   RuntimeGameTransitionError,
+  type RuntimeResolutionOutcome,
   type RuntimeGameSnapshot,
   type RuntimeResultPhaseSnapshot,
   type RuntimeRoundResolution,
@@ -23,7 +24,10 @@ export type DirectDuelRound = {
 };
 
 export type DirectDuelOutcome = "WIN" | "LOSS" | "DRAW";
-export type DirectDuelCompletionReason = "ROUNDS_COMPLETE" | "ABANDON";
+export type DirectDuelCompletionReason =
+  | "ROUNDS_COMPLETE"
+  | "ABANDON"
+  | "DISCONNECT_FORFEIT";
 
 export type DirectDuelRankedProgress =
   | {
@@ -85,6 +89,7 @@ export type DirectDuelFinalizationInput = {
   rounds: RuntimeGameSnapshot["rounds"];
   completionReason: DirectDuelCompletionReason;
   abandonedRuntimePlayerId?: string;
+  forfeitedRuntimePlayerId?: string;
   startedAt: Date;
   endedAt: Date;
 };
@@ -124,6 +129,7 @@ export type DirectDuelEvent = {
   outcome?: DirectDuelOutcome;
   completionReason?: DirectDuelCompletionReason;
   abandonedRuntimePlayerId?: string;
+  forfeitedRuntimePlayerId?: string;
   totalScore?: number;
   opponentTotalScore?: number;
   rankedProgress?: {
@@ -149,6 +155,11 @@ type DirectDuelSession = {
   cancelPreGameTimer?: () => void;
   cancelRoundTimer?: () => void;
   cancelResultTimer?: () => void;
+  disconnects: Map<string, DirectDuelDisconnect>;
+  completionEvents?: Map<
+    string,
+    Omit<DirectDuelEvent, "sequence" | "duelId">
+  >;
   completionSent?: boolean;
   finalizationPromise?: Promise<void>;
 };
@@ -157,6 +168,12 @@ type DirectDuelInvite = {
   duelId: string;
   expiresAt: Date;
   usedByRuntimePlayerId?: string;
+};
+
+type DirectDuelDisconnect = {
+  disconnectedAt: Date;
+  endsAt: Date;
+  cancelTimer: () => void;
 };
 
 type DirectDuelServiceOptions = {
@@ -168,6 +185,7 @@ type DirectDuelServiceOptions = {
   roundDurationMs: number;
   finalWindowMs: number;
   resultPhaseDurationMs: number;
+  disconnectTimeoutMs: number;
   now: () => Date;
   schedule: (callback: () => void, delayMs: number) => () => void;
   finalizeDuel?: (
@@ -250,7 +268,14 @@ export class DirectDuelService {
   private readonly sessions = new Map<string, DirectDuelSession>();
   private readonly invites = new Map<string, DirectDuelInvite>();
 
-  constructor(private readonly options: DirectDuelServiceOptions) {}
+  constructor(private readonly options: DirectDuelServiceOptions) {
+    if (
+      !Number.isFinite(options.disconnectTimeoutMs) ||
+      options.disconnectTimeoutMs <= 0
+    ) {
+      throw new Error("Duel disconnect timeout must be positive.");
+    }
+  }
 
   create(player: RuntimePlayer, difficulty: GameDifficulty) {
     const session = this.createSession(player, difficulty, "DUEL_ID", false);
@@ -329,6 +354,7 @@ export class DirectDuelService {
       players: [player],
       sequence: 0,
       listeners: new Map(),
+      disconnects: new Map(),
     });
 
     return this.sessions.get(duelId)!;
@@ -427,71 +453,69 @@ export class DirectDuelService {
     const participant = this.sessionPlayer(session, player);
 
     let listeners = session.listeners.get(player.runtimePlayerId);
+    const wasConnected = Boolean(listeners?.size);
     if (!listeners) {
       listeners = new Set();
       session.listeners.set(player.runtimePlayerId, listeners);
     }
     listeners.add(listener);
-    this.emit(session, listener, {
-      type: "connected",
-      player: toRuntimePlayerSummary(participant),
-    });
-    const snapshot = session.game?.snapshot();
-    if (snapshot) {
-      this.emit(session, listener, {
-        type: "game_started",
-        players: session.players.map(toRuntimePlayerSummary),
-        difficulty: session.difficulty,
-        rated: session.rated,
-      });
-      if (snapshot.currentRound) {
-        this.emit(session, listener, {
-          type: "round_started",
-          round: roundDefinition(snapshot.currentRound),
-        });
-      } else if (snapshot.resultPhase) {
-        const resolvedRound = snapshot.rounds.find(
-          (round) => round.roundNumber === snapshot.resultPhase?.roundNumber,
-        );
-        if (resolvedRound) {
-          this.emit(session, listener, {
-            type: "round_resolved",
-            roundNumber: resolvedRound.roundNumber,
-            results: resolvedRound.players.flatMap((state) =>
-              state.resolution ? [state.resolution] : [],
-            ),
-            totals: snapshot.totals,
-          });
-          if (snapshot.resultPhase.state === "WAITING") {
-            this.emit(session, listener, {
-              type: "result_phase_started",
-              roundNumber: snapshot.resultPhase.roundNumber,
-              resultPhase: resultPhaseDefinition(snapshot.resultPhase),
-            });
-          }
-        }
-      }
-    } else if (session.preGame) {
-      this.emit(session, listener, {
-        type: "pre_game_started",
-        players: session.players.map(toRuntimePlayerSummary),
-        difficulty: session.difficulty,
-        rated: session.rated,
-        preGame: preGameDefinition(session.preGame),
-      });
-    } else {
-      this.emit(session, listener, {
-        type: "waiting_for_opponent",
-        players: session.players.map(toRuntimePlayerSummary),
-        difficulty: session.difficulty,
-        rated: session.rated,
-      });
+    if (!wasConnected) {
+      this.cancelDisconnectTimer(session, player.runtimePlayerId);
     }
+    this.sendSessionSnapshot(session, participant, listener);
 
     return () => {
       listeners?.delete(listener);
-      if (listeners?.size === 0) {
+      if (
+        listeners?.size === 0 &&
+        session.listeners.get(player.runtimePlayerId) === listeners
+      ) {
         session.listeners.delete(player.runtimePlayerId);
+        const snapshot = session.game?.snapshot();
+        const resultPhase = snapshot?.resultPhase;
+        if (resultPhase?.state === "ANIMATING") {
+          const completion = session.game?.completeResultAnimation(
+            participant,
+            resultPhase.roundNumber,
+            this.options.now(),
+          );
+          if (completion?.resultWaitStarted && completion.resultPhase) {
+            this.broadcast(session, {
+              type: "result_phase_started",
+              roundNumber: resultPhase.roundNumber,
+              resultPhase: resultPhaseDefinition(completion.resultPhase),
+            });
+            this.scheduleResultPhase(session, completion.resultPhase);
+          }
+        }
+        if (
+          resultPhase?.state === "WAITING" &&
+          resultPhase.readyRuntimePlayerIds.some(
+            (runtimePlayerId) =>
+              runtimePlayerId !== participant.runtimePlayerId &&
+              session.listeners.get(runtimePlayerId)?.size,
+          )
+        ) {
+          const readiness = session.game?.readyForNextRound(
+            participant,
+            resultPhase.roundNumber,
+            this.options.now(),
+          );
+          if (readiness?.status === "APPLIED") {
+            this.broadcast(session, {
+              type: "player_ready",
+              roundNumber: resultPhase.roundNumber,
+              runtimePlayerId: participant.runtimePlayerId,
+              readyRuntimePlayerIds: readiness.readyRuntimePlayerIds,
+            });
+          }
+          if (readiness?.roundAdvanced && readiness.nextRound) {
+            session.cancelResultTimer?.();
+            session.cancelResultTimer = undefined;
+            this.startRound(session, readiness.nextRound);
+          }
+        }
+        this.startDisconnectTimer(session, participant);
       }
     };
   }
@@ -561,31 +585,7 @@ export class DirectDuelService {
       this.scheduleRound(session, activeRound);
     }
 
-    if (resolution.roundResultStarted || resolution.gameFinalized) {
-      const snapshot = game.snapshot();
-      const resolvedRound = snapshot.rounds.find(
-        (round) => round.roundNumber === roundNumber,
-      );
-      if (!resolvedRound) {
-        throw new Error("Resolved Duel round is missing from runtime state.");
-      }
-
-      this.broadcast(session, {
-        type: "round_resolved",
-        roundNumber,
-        results: resolvedRound.players.flatMap((state) =>
-          state.resolution ? [state.resolution] : [],
-        ),
-        totals: snapshot.totals,
-      });
-
-      session.cancelRoundTimer?.();
-      session.cancelRoundTimer = undefined;
-
-      if (resolution.gameFinalized) {
-        await this.completeSession(session, snapshot);
-      }
-    }
+    await this.handleResolutionOutcome(session, roundNumber, resolution);
 
     return resolution;
   }
@@ -659,12 +659,9 @@ export class DirectDuelService {
     if (!game) throw new DirectDuelError("The Duel has not started.", 409);
 
     let readiness;
+    const readyAt = this.options.now();
     try {
-      readiness = game.readyForNextRound(
-        player,
-        roundNumber,
-        this.options.now(),
-      );
+      readiness = game.readyForNextRound(player, roundNumber, readyAt);
     } catch (error) {
       if (error instanceof RuntimeGameTransitionError) {
         throw new DirectDuelError(error.message, 409);
@@ -679,6 +676,32 @@ export class DirectDuelService {
         runtimePlayerId: player.runtimePlayerId,
         readyRuntimePlayerIds: readiness.readyRuntimePlayerIds,
       });
+    }
+
+    if (!readiness.roundAdvanced) {
+      for (const disconnectedPlayer of session.players) {
+        if (session.listeners.get(disconnectedPlayer.runtimePlayerId)?.size) {
+          continue;
+        }
+        const disconnectedReadiness = game.readyForNextRound(
+          disconnectedPlayer,
+          roundNumber,
+          readyAt,
+        );
+        if (disconnectedReadiness.status === "APPLIED") {
+          this.broadcast(session, {
+            type: "player_ready",
+            roundNumber,
+            runtimePlayerId: disconnectedPlayer.runtimePlayerId,
+            readyRuntimePlayerIds:
+              disconnectedReadiness.readyRuntimePlayerIds,
+          });
+        }
+        if (disconnectedReadiness.roundAdvanced) {
+          readiness = disconnectedReadiness;
+          break;
+        }
+      }
     }
 
     if (readiness.roundAdvanced && readiness.nextRound) {
@@ -770,6 +793,11 @@ export class DirectDuelService {
       rated: session.rated,
     });
     this.startRound(session, round);
+    for (const player of session.players) {
+      if (!session.listeners.get(player.runtimePlayerId)?.size) {
+        this.startDisconnectTimer(session, player);
+      }
+    }
   }
 
   private scheduleRound(session: DirectDuelSession, round: RuntimeRoundSnapshot) {
@@ -795,13 +823,9 @@ export class DirectDuelService {
     );
     session.cancelResultTimer = this.options.schedule(() => {
       session.cancelResultTimer = undefined;
-      const advanced = session.game?.advanceResultPhase(
-        resultPhase.roundNumber,
-        this.options.now(),
-      );
-      if (advanced?.roundAdvanced && advanced.nextRound) {
-        this.startRound(session, advanced.nextRound);
-      }
+      void this.handleResultPhaseDeadline(session, resultPhase).catch((error) => {
+        console.error("Duel result phase transition failed:", error);
+      });
     }, delayMs);
   }
 
@@ -822,8 +846,6 @@ export class DirectDuelService {
     if (game.snapshot().state === "COMPLETE") return;
 
     for (const player of session.players) {
-      if (!session.listeners.get(player.runtimePlayerId)?.size) continue;
-
       const request = game.timeoutSubmissionRequest(
         player,
         round.roundNumber,
@@ -831,12 +853,278 @@ export class DirectDuelService {
       );
       if (!request) continue;
 
+      if (!session.listeners.get(player.runtimePlayerId)?.size) {
+        const resolution = game.resolvePlayer({
+          player,
+          roundNumber: request.roundNumber,
+          submissionType: "TIMEOUT",
+          calculatedPopulation: 0,
+          resolvedAt: request.requestedAt,
+        });
+        this.sendToOpponent(session, player.runtimePlayerId, {
+          type: "opponent_submitted",
+          roundNumber: request.roundNumber,
+          runtimePlayerId: player.runtimePlayerId,
+        });
+        void this.handleResolutionOutcome(
+          session,
+          request.roundNumber,
+          resolution,
+        ).catch((error) => {
+          console.error("Disconnected Duel timeout resolution failed:", error);
+        });
+        continue;
+      }
+
       this.sendToPlayer(session, player.runtimePlayerId, {
         type: "timeout_submission_requested",
         roundNumber: request.roundNumber,
         runtimePlayerId: request.runtimePlayerId,
         requestedAt: request.requestedAt.toISOString(),
       });
+    }
+  }
+
+  private startDisconnectTimer(
+    session: DirectDuelSession,
+    player: RuntimePlayer,
+  ) {
+    if (
+      !session.game ||
+      session.game.snapshot().state === "COMPLETE" ||
+      session.listeners.get(player.runtimePlayerId)?.size
+    ) {
+      return;
+    }
+
+    this.cancelDisconnectTimer(session, player.runtimePlayerId);
+    const disconnectedAt = this.options.now();
+    const disconnect = {
+      disconnectedAt,
+      endsAt: new Date(
+        disconnectedAt.getTime() + this.options.disconnectTimeoutMs,
+      ),
+      cancelTimer: () => undefined,
+    };
+    session.disconnects.set(player.runtimePlayerId, disconnect);
+    this.scheduleDisconnectDeadline(session, player, disconnect);
+  }
+
+  private scheduleDisconnectDeadline(
+    session: DirectDuelSession,
+    player: RuntimePlayer,
+    disconnect: DirectDuelDisconnect,
+  ) {
+    disconnect.cancelTimer = this.options.schedule(() => {
+      if (session.disconnects.get(player.runtimePlayerId) !== disconnect) return;
+      if (session.listeners.get(player.runtimePlayerId)?.size) {
+        session.disconnects.delete(player.runtimePlayerId);
+        return;
+      }
+
+      const now = this.options.now();
+      if (now < disconnect.endsAt) {
+        this.scheduleDisconnectDeadline(session, player, disconnect);
+        return;
+      }
+
+      session.disconnects.delete(player.runtimePlayerId);
+      void this.handleDisconnectDeadline(session, player, now).catch((error) => {
+        console.error("Duel disconnect forfeit failed:", error);
+      });
+    }, Math.max(0, disconnect.endsAt.getTime() - this.options.now().getTime()));
+  }
+
+  private cancelDisconnectTimer(
+    session: DirectDuelSession,
+    runtimePlayerId: string,
+  ) {
+    const disconnect = session.disconnects.get(runtimePlayerId);
+    if (!disconnect) return;
+    session.disconnects.delete(runtimePlayerId);
+    disconnect.cancelTimer();
+  }
+
+  private cancelAllDisconnectTimers(session: DirectDuelSession) {
+    for (const runtimePlayerId of session.disconnects.keys()) {
+      this.cancelDisconnectTimer(session, runtimePlayerId);
+    }
+  }
+
+  private async handleDisconnectDeadline(
+    session: DirectDuelSession,
+    player: RuntimePlayer,
+    completedAt: Date,
+  ) {
+    const game = session.game;
+    if (!game || game.snapshot().state === "COMPLETE") return;
+    const forfeit = game.forfeitDisconnectedPlayer(player, completedAt);
+    if (forfeit.status === "APPLIED") {
+      await this.completeSession(session, game.snapshot());
+    }
+  }
+
+  private sendSessionSnapshot(
+    session: DirectDuelSession,
+    participant: RuntimePlayer,
+    listener: (event: DirectDuelEvent) => void,
+  ) {
+    this.emit(session, listener, {
+      type: "connected",
+      player: toRuntimePlayerSummary(participant),
+    });
+    const snapshot = session.game?.snapshot();
+    if (!snapshot) {
+      this.emit(
+        session,
+        listener,
+        session.preGame
+          ? {
+              type: "pre_game_started",
+              players: session.players.map(toRuntimePlayerSummary),
+              difficulty: session.difficulty,
+              rated: session.rated,
+              preGame: preGameDefinition(session.preGame),
+            }
+          : {
+              type: "waiting_for_opponent",
+              players: session.players.map(toRuntimePlayerSummary),
+              difficulty: session.difficulty,
+              rated: session.rated,
+            },
+      );
+      return;
+    }
+
+    this.emit(session, listener, {
+      type: "game_started",
+      players: session.players.map(toRuntimePlayerSummary),
+      difficulty: session.difficulty,
+      rated: session.rated,
+    });
+    if (snapshot.currentRound) {
+      this.emit(session, listener, {
+        type: "round_started",
+        round: roundDefinition(snapshot.currentRound),
+      });
+    }
+    for (const round of snapshot.rounds) {
+      if (round.state !== "RESOLVED") continue;
+      this.emit(session, listener, {
+        type: "round_resolved",
+        roundNumber: round.roundNumber,
+        results: round.players.flatMap((state) =>
+          state.resolution ? [state.resolution] : [],
+        ),
+        totals: snapshot.totals,
+      });
+    }
+
+    if (snapshot.currentRound) {
+      const ownState = snapshot.currentRound.players.find(
+        (state) =>
+          state.player.runtimePlayerId === participant.runtimePlayerId,
+      );
+      const opponentState = snapshot.currentRound.players.find(
+        (state) =>
+          state.player.runtimePlayerId !== participant.runtimePlayerId,
+      );
+      if (ownState?.resolution) {
+        this.emit(session, listener, {
+          type: "submission_accepted",
+          roundNumber: snapshot.currentRound.roundNumber,
+          result: ownState.resolution,
+        });
+      }
+      if (opponentState?.resolution) {
+        this.emit(session, listener, {
+          type: "opponent_submitted",
+          roundNumber: snapshot.currentRound.roundNumber,
+          runtimePlayerId: opponentState.player.runtimePlayerId,
+        });
+      }
+    } else if (
+      snapshot.resultPhase &&
+      snapshot.resultPhase.state !== "ANIMATING"
+    ) {
+      this.emit(session, listener, {
+        type: "result_phase_started",
+        roundNumber: snapshot.resultPhase.roundNumber,
+        resultPhase: resultPhaseDefinition(snapshot.resultPhase),
+      });
+    }
+
+    const completion = session.completionEvents?.get(
+      participant.runtimePlayerId,
+    );
+    if (snapshot.state === "COMPLETE" && completion) {
+      this.emit(session, listener, completion);
+    }
+  }
+
+  private async handleResolutionOutcome(
+    session: DirectDuelSession,
+    roundNumber: number,
+    resolution: RuntimeResolutionOutcome,
+  ) {
+    if (!resolution.roundResultStarted && !resolution.gameFinalized) return;
+    const game = session.game;
+    if (!game) return;
+    const snapshot = game.snapshot();
+    const resolvedRound = snapshot.rounds.find(
+      (round) => round.roundNumber === roundNumber,
+    );
+    if (!resolvedRound) {
+      throw new Error("Resolved Duel round is missing from runtime state.");
+    }
+
+    this.broadcast(session, {
+      type: "round_resolved",
+      roundNumber,
+      results: resolvedRound.players.flatMap((state) =>
+        state.resolution ? [state.resolution] : [],
+      ),
+      totals: snapshot.totals,
+    });
+    session.cancelRoundTimer?.();
+    session.cancelRoundTimer = undefined;
+
+    if (resolution.gameFinalized) {
+      await this.completeSession(session, snapshot);
+      return;
+    }
+
+    for (const player of session.players) {
+      if (session.listeners.get(player.runtimePlayerId)?.size) continue;
+      const completion = game.completeResultAnimation(
+        player,
+        roundNumber,
+        this.options.now(),
+      );
+      if (completion.resultWaitStarted && completion.resultPhase) {
+        this.broadcast(session, {
+          type: "result_phase_started",
+          roundNumber,
+          resultPhase: resultPhaseDefinition(completion.resultPhase),
+        });
+        this.scheduleResultPhase(session, completion.resultPhase);
+      }
+    }
+  }
+
+  private async handleResultPhaseDeadline(
+    session: DirectDuelSession,
+    scheduledPhase: RuntimeResultPhaseSnapshot,
+  ) {
+    const game = session.game;
+    if (!game) return;
+    const advanced = game.advanceResultPhase(
+      scheduledPhase.roundNumber,
+      this.options.now(),
+    );
+    if (advanced.roundAdvanced && advanced.nextRound) {
+      this.startRound(session, advanced.nextRound);
+      return;
     }
   }
 
@@ -848,19 +1136,31 @@ export class DirectDuelService {
     const [first, second] = session.players;
     const firstTotal = snapshot.totals[first.runtimePlayerId] ?? 0;
     const secondTotal = snapshot.totals[second.runtimePlayerId] ?? 0;
-    const completionReason = snapshot.abandonment
+    const completionReason: DirectDuelCompletionReason = snapshot.abandonment
       ? "ABANDON"
-      : "ROUNDS_COMPLETE";
+      : snapshot.disconnectCompletion
+        ? "DISCONNECT_FORFEIT"
+        : "ROUNDS_COMPLETE";
     const firstOutcome = snapshot.abandonment
       ? snapshot.abandonment.abandonedRuntimePlayerId === first.runtimePlayerId
         ? "LOSS"
         : "WIN"
-      : outcome(firstTotal, secondTotal);
+      : snapshot.disconnectCompletion
+        ? snapshot.disconnectCompletion.winnerRuntimePlayerId ===
+          first.runtimePlayerId
+          ? "WIN"
+          : "LOSS"
+        : outcome(firstTotal, secondTotal);
     const secondOutcome = snapshot.abandonment
       ? snapshot.abandonment.abandonedRuntimePlayerId === second.runtimePlayerId
         ? "LOSS"
         : "WIN"
-      : outcome(secondTotal, firstTotal);
+      : snapshot.disconnectCompletion
+        ? snapshot.disconnectCompletion.winnerRuntimePlayerId ===
+          second.runtimePlayerId
+          ? "WIN"
+          : "LOSS"
+        : outcome(secondTotal, firstTotal);
     const competitiveChanges =
       finalizationResult?.status === "APPLIED"
         ? finalizationResult.competitiveChanges
@@ -879,34 +1179,49 @@ export class DirectDuelService {
         : undefined;
     };
 
-    this.sendToPlayer(session, first.runtimePlayerId, {
+    const firstCompletion = {
       type: "game_completed",
       outcome: firstOutcome,
       completionReason,
       abandonedRuntimePlayerId:
         snapshot.abandonment?.abandonedRuntimePlayerId,
+      forfeitedRuntimePlayerId:
+        snapshot.disconnectCompletion?.forfeitedRuntimePlayerId,
       totalScore: firstTotal,
       opponentTotalScore: secondTotal,
       totals: snapshot.totals,
       rankedProgress: progressFor(first),
-    });
-    this.sendToPlayer(session, second.runtimePlayerId, {
+    } satisfies Omit<DirectDuelEvent, "sequence" | "duelId">;
+    const secondCompletion = {
       type: "game_completed",
       outcome: secondOutcome,
       completionReason,
       abandonedRuntimePlayerId:
         snapshot.abandonment?.abandonedRuntimePlayerId,
+      forfeitedRuntimePlayerId:
+        snapshot.disconnectCompletion?.forfeitedRuntimePlayerId,
       totalScore: secondTotal,
       opponentTotalScore: firstTotal,
       totals: snapshot.totals,
       rankedProgress: progressFor(second),
-    });
+    } satisfies Omit<DirectDuelEvent, "sequence" | "duelId">;
+    session.completionEvents = new Map([
+      [first.runtimePlayerId, firstCompletion],
+      [second.runtimePlayerId, secondCompletion],
+    ]);
+    this.sendToPlayer(session, first.runtimePlayerId, firstCompletion);
+    this.sendToPlayer(session, second.runtimePlayerId, secondCompletion);
   }
 
   private async completeSession(
     session: DirectDuelSession,
     snapshot: RuntimeGameSnapshot,
   ) {
+    session.cancelRoundTimer?.();
+    session.cancelRoundTimer = undefined;
+    session.cancelResultTimer?.();
+    session.cancelResultTimer = undefined;
+    this.cancelAllDisconnectTimers(session);
     if (session.completionSent) return;
     if (session.finalizationPromise) return session.finalizationPromise;
 
@@ -935,9 +1250,13 @@ export class DirectDuelService {
         rounds: snapshot.rounds,
         completionReason: snapshot.abandonment
           ? "ABANDON"
-          : "ROUNDS_COMPLETE",
+          : snapshot.disconnectCompletion
+            ? "DISCONNECT_FORFEIT"
+            : "ROUNDS_COMPLETE",
         abandonedRuntimePlayerId:
           snapshot.abandonment?.abandonedRuntimePlayerId,
+        forfeitedRuntimePlayerId:
+          snapshot.disconnectCompletion?.forfeitedRuntimePlayerId,
         startedAt,
         endedAt,
       });

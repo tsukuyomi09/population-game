@@ -53,6 +53,7 @@ import {
 import type { RuntimePlayerSummary } from "../game/runtime-player";
 import type {
   DirectDuelEvent,
+  DirectDuelCompletionReason,
   DirectDuelOutcome,
   DirectDuelPreGame,
   DirectDuelResultPhase,
@@ -464,6 +465,8 @@ export function WorldMap({
   const [duelReadyPlayerIds, setDuelReadyPlayerIds] = useState<string[]>([]);
   const [isDuelReadyPending, setIsDuelReadyPending] = useState(false);
   const [duelOutcome, setDuelOutcome] = useState<DirectDuelOutcome | null>(null);
+  const [duelCompletionReason, setDuelCompletionReason] =
+    useState<DirectDuelCompletionReason | null>(null);
   const [duelRankedProgress, setDuelRankedProgress] = useState<
     NonNullable<DirectDuelEvent["rankedProgress"]> | null
   >(null);
@@ -940,11 +943,16 @@ export function WorldMap({
             nextScores[event.roundNumber! - 1] = own.score;
             return nextScores;
           });
-          setDuelRoundResult({
-            roundNumber: event.roundNumber,
-            own,
-            opponent,
-          });
+          if (
+            duelRoundNumberRef.current === null ||
+            duelRoundNumberRef.current === event.roundNumber
+          ) {
+            setDuelRoundResult({
+              roundNumber: event.roundNumber,
+              own,
+              opponent,
+            });
+          }
           if (event.totals) {
             setTotalScore(event.totals[own.runtimePlayerId] ?? 0);
             setOpponentTotalScore(event.totals[opponent.runtimePlayerId] ?? 0);
@@ -980,6 +988,7 @@ export function WorldMap({
         }
         setIsDuelAbandonPending(false);
         setDuelOutcome(event.outcome);
+        setDuelCompletionReason(event.completionReason ?? null);
         setDuelRankedProgress(event.rankedProgress ?? null);
         setTotalScore(event.totalScore ?? 0);
         setOpponentTotalScore(event.opponentTotalScore ?? 0);
@@ -1094,7 +1103,6 @@ export function WorldMap({
     runtimePlayer &&
       duelReadyPlayerIds.includes(runtimePlayer.runtimePlayerId),
   );
-
   return (
     <>
       <main ref={mapContainer} className="h-screen w-screen" />
@@ -1507,21 +1515,19 @@ export function WorldMap({
               </div>
 
               {duelResultPhase ? (
-                <>
-                  <Button
-                    type="button"
-                    onClick={() => void readyForNextDuelRound()}
-                    disabled={isDuelReadyPending || isCurrentDuelPlayerReady}
-                    className="mt-6 h-11 w-full max-w-64 font-black"
-                  >
-                    {isCurrentDuelPlayerReady || isDuelReadyPending
-                      ? "Waiting for opponent…"
-                      : "Next round"}
-                    {!isCurrentDuelPlayerReady && !isDuelReadyPending && (
-                      <ChevronRight aria-hidden="true" />
-                    )}
-                  </Button>
-                </>
+                <Button
+                  type="button"
+                  onClick={() => void readyForNextDuelRound()}
+                  disabled={isDuelReadyPending || isCurrentDuelPlayerReady}
+                  className="mt-6 h-11 w-full max-w-64 font-black"
+                >
+                  {isCurrentDuelPlayerReady || isDuelReadyPending
+                    ? "Waiting for opponent…"
+                    : "Next round"}
+                  {!isCurrentDuelPlayerReady && !isDuelReadyPending && (
+                    <ChevronRight aria-hidden="true" />
+                  )}
+                </Button>
               ) : (
                 <p className="mt-6 font-mono text-xs text-muted-foreground">
                   {duelAnimationCompleteRound === duelRoundResult.roundNumber
@@ -1598,7 +1604,9 @@ export function WorldMap({
               <p className="text-xs font-black tracking-[0.2em] text-primary uppercase">
                 {duelAbandonRole === "OPPONENT"
                   ? `${duelRated ? "Ranked" : "1v1"} · Opponent abandoned`
-                  : `${duelRated ? "Ranked" : "1v1"} · Duel complete`}
+                  : duelCompletionReason === "DISCONNECT_FORFEIT"
+                    ? `${duelRated ? "Ranked" : "1v1"} · ${duelOutcome === "WIN" ? "Opponent disconnected" : "Disconnected"}`
+                    : `${duelRated ? "Ranked" : "1v1"} · Duel complete`}
               </p>
               <h1 className="mt-3 text-5xl font-black tracking-tight">
                 {duelAbandonRole === "OPPONENT"
@@ -1613,6 +1621,13 @@ export function WorldMap({
                 <p className="mt-3 text-sm text-muted-foreground">
                   The Duel ended immediately. Your authoritative result is {" "}
                   <span className="font-black text-primary">{duelOutcome}</span>.
+                </p>
+              )}
+              {duelCompletionReason === "DISCONNECT_FORFEIT" && (
+                <p className="mt-3 text-sm text-muted-foreground">
+                  {duelOutcome === "WIN"
+                    ? "Your opponent remained disconnected for 120 seconds."
+                    : "You lost after remaining disconnected for 120 seconds."}
                 </p>
               )}
 

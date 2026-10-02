@@ -53,10 +53,18 @@ function shape(population: number): PopulationShape {
 
 class FakeRuntime {
   now = new Date("2026-01-01T00:00:00.000Z");
-  private timers: Array<{ callback: () => void; cancelled: boolean }> = [];
+  private timers: Array<{
+    callback: () => void;
+    cancelled: boolean;
+    runsAt: Date;
+  }> = [];
 
-  schedule = (callback: () => void) => {
-    const timer = { callback, cancelled: false };
+  schedule = (callback: () => void, delayMs: number) => {
+    const timer = {
+      callback,
+      cancelled: false,
+      runsAt: new Date(this.now.getTime() + delayMs),
+    };
     this.timers.push(timer);
     return () => {
       timer.cancelled = true;
@@ -73,7 +81,12 @@ class FakeRuntime {
 
   fireNextTimerAt(value: string | Date) {
     this.moveTo(value);
-    const timer = this.timers.find((candidate) => !candidate.cancelled);
+    const timer = this.timers
+      .filter(
+        (candidate) =>
+          !candidate.cancelled && candidate.runsAt.getTime() <= this.now.getTime(),
+      )
+      .sort((left, right) => left.runsAt.getTime() - right.runsAt.getTime())[0];
     assert.ok(timer);
     timer.cancelled = true;
     timer.callback();
@@ -81,6 +94,13 @@ class FakeRuntime {
 
   activeTimerCount() {
     return this.timers.filter((timer) => !timer.cancelled).length;
+  }
+
+  activeTimerTimes() {
+    return this.timers
+      .filter((timer) => !timer.cancelled)
+      .map((timer) => timer.runsAt.toISOString())
+      .sort();
   }
 }
 
@@ -99,6 +119,7 @@ function service(
     roundDurationMs: 120_000,
     finalWindowMs: 10_000,
     resultPhaseDurationMs: 10_000,
+    disconnectTimeoutMs: 120_000,
     now: () => new Date(runtime.now),
     schedule: runtime.schedule,
     finalizeDuel,
@@ -107,6 +128,44 @@ function service(
 
 async function population(shapes: PopulationShape[]) {
   return Number(shapes[0]?.id ?? 0);
+}
+
+async function flushAsyncWork() {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+async function startResultWait(
+  duels: DirectDuelService,
+  runtime: FakeRuntime,
+  duelId: string,
+  first: RuntimePlayer,
+  second: RuntimePlayer,
+  events: DirectDuelEvent[],
+) {
+  runtime.moveTo("2026-01-01T00:00:01.000Z");
+  await duels.submit(
+    duelId,
+    first,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  await duels.submit(
+    duelId,
+    second,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  duels.completeResultAnimation(duelId, first, 1);
+  duels.completeResultAnimation(duelId, second, 1);
+  const resultPhase = [...events]
+    .reverse()
+    .find((event) => event.type === "result_phase_started")?.resultPhase;
+  assert.ok(resultPhase);
+  return resultPhase;
 }
 
 test("guest and registered creators make unrated short-lived invites", () => {
@@ -173,6 +232,7 @@ test("Ranked invites require two registered players and start exactly once", () 
   assert.equal(joined.status, "COUNTDOWN");
   assert.equal(joined.rated, true);
   assert.equal(joined.players.length, 2);
+  duels.subscribe(created.duelId, joiner, () => undefined);
   assert.equal(runtime.activeTimerCount(), 1);
   assert.equal(
     creatorEvents.filter((event) => event.type === "pre_game_started").length,
@@ -828,6 +888,323 @@ test("ready actions wait for both players and reject stale rounds", async () => 
   assert.equal(staleAnimation.resultWaitStarted, false);
 });
 
+test("disconnect under 120 seconds cancels forfeit and restores active-round state", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const initialEvents: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  const disconnectFirst = duels.subscribe(duelId, first, (event) =>
+    initialEvents.push(event),
+  );
+  duels.join(second, duelId);
+  duels.subscribe(duelId, second, () => undefined);
+  const originalRound = initialEvents.find(
+    (event) => event.type === "round_started",
+  )?.round;
+  assert.ok(originalRound);
+
+  runtime.moveTo(new Date(new Date(originalRound.startedAt).getTime() + 15_000));
+  await duels.submit(
+    duelId,
+    first,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  disconnectFirst();
+  assert.equal(runtime.activeTimerCount(), 2);
+  runtime.moveTo(new Date(new Date(originalRound.startedAt).getTime() + 30_000));
+  const reconnectEvents: DirectDuelEvent[] = [];
+  duels.subscribe(duelId, first, (event) => reconnectEvents.push(event));
+  assert.equal(runtime.activeTimerCount(), 1);
+
+  const restoredRound = reconnectEvents.find(
+    (event) => event.type === "round_started",
+  )?.round;
+  assert.equal(restoredRound?.startedAt, originalRound.startedAt);
+  assert.equal(
+    restoredRound?.endsAt,
+    initialEvents.find(
+      (event) => event.type === "round_deadline_updated",
+    )?.round?.endsAt,
+  );
+  assert.equal(
+    reconnectEvents.some(
+      (event) =>
+        event.type === "submission_accepted" && event.roundNumber === 1,
+    ),
+    true,
+  );
+});
+
+test("Continue does not wait for a disconnected opponent", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  await startResultWait(
+    duels,
+    runtime,
+    duelId,
+    first,
+    second,
+    events,
+  );
+
+  disconnectSecond();
+  const disconnectDeadline = new Date(
+    runtime.now.getTime() + 120_000,
+  ).toISOString();
+  const firstReady = duels.readyForNextRound(duelId, first, 1);
+  assert.equal(firstReady.roundAdvanced, true);
+
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === "round_started" && event.round?.roundNumber === 2,
+    ),
+    true,
+  );
+  assert.equal(
+    events.some((event) => event.type === "game_completed"),
+    false,
+  );
+  assert.equal(runtime.activeTimerCount(), 2);
+  assert.equal(runtime.activeTimerTimes().includes(disconnectDeadline), true);
+});
+
+test("reconnect in a later round restores the current authoritative round", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  const resultPhase = await startResultWait(
+    duels,
+    runtime,
+    duelId,
+    first,
+    second,
+    events,
+  );
+  disconnectSecond();
+  runtime.fireNextTimerAt(resultPhase.endsAt);
+  const secondRound = [...events]
+    .reverse()
+    .find((event) => event.type === "round_started")?.round;
+  assert.equal(secondRound?.roundNumber, 2);
+
+  const reconnectEvents: DirectDuelEvent[] = [];
+  duels.subscribe(duelId, second, (event) => reconnectEvents.push(event));
+  const restoredRound = reconnectEvents.find(
+    (event) => event.type === "round_started",
+  )?.round;
+  assert.deepEqual(restoredRound, secondRound);
+  assert.equal(
+    reconnectEvents.some(
+      (event) =>
+        event.type === "round_resolved" && event.roundNumber === 1,
+    ),
+    true,
+  );
+  assert.equal(runtime.activeTimerCount(), 1);
+});
+
+test("disconnect during result animation cannot stall the inter-round flow", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  runtime.moveTo("2026-01-01T00:00:01.000Z");
+  await duels.submit(
+    duelId,
+    first,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+  await duels.submit(
+    duelId,
+    second,
+    1,
+    "MANUAL",
+    [shape(1_000)],
+    population,
+  );
+
+  disconnectSecond();
+  const firstCompletion = duels.completeResultAnimation(duelId, first, 1);
+  assert.equal(firstCompletion.resultWaitStarted, true);
+  assert.equal(
+    events.some(
+      (event) =>
+        event.type === "result_phase_started" &&
+        event.resultPhase !== undefined,
+    ),
+    true,
+  );
+  assert.equal(runtime.activeTimerCount(), 2);
+});
+
+test("120 seconds of continuous disconnect finalizes a replayable forfeit", async () => {
+  const runtime = new FakeRuntime();
+  const finalizations: DirectDuelFinalizationInput[] = [];
+  const duels = service(runtime, async (input) => {
+    finalizations.push(input);
+    return { status: "APPLIED", competitiveChanges: [] };
+  });
+  const first = registered("player-1");
+  const second = registered("player-2");
+  const firstEvents: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => firstEvents.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  const round = firstEvents.find(
+    (event) => event.type === "round_started",
+  )?.round;
+  assert.ok(round);
+
+  runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 1_000));
+  disconnectSecond();
+  runtime.fireRoundDeadline(round);
+  runtime.fireNextTimerAt(
+    new Date(new Date(round.startedAt).getTime() + 121_000),
+  );
+  await flushAsyncWork();
+
+  assert.equal(finalizations.length, 1);
+  assert.equal(finalizations[0]?.completionReason, "DISCONNECT_FORFEIT");
+  assert.equal(
+    finalizations[0]?.forfeitedRuntimePlayerId,
+    second.runtimePlayerId,
+  );
+  assert.equal(
+    firstEvents.find((event) => event.type === "game_completed")?.outcome,
+    "WIN",
+  );
+
+  const reconnectEvents: DirectDuelEvent[] = [];
+  duels.subscribe(duelId, second, (event) => reconnectEvents.push(event));
+  const completion = reconnectEvents.find(
+    (event) => event.type === "game_completed",
+  );
+  assert.equal(completion?.outcome, "LOSS");
+  assert.equal(completion?.completionReason, "DISCONNECT_FORFEIT");
+});
+
+test("repeated disconnects each receive a fresh 120-second window", () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const events: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => events.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  const round = events.find((event) => event.type === "round_started")?.round;
+  assert.ok(round);
+
+  runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 10_000));
+  disconnectSecond();
+  assert.equal(
+    runtime.activeTimerTimes().includes(
+      new Date(new Date(round.startedAt).getTime() + 130_000).toISOString(),
+    ),
+    true,
+  );
+
+  runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 100_000));
+  const disconnectAgain = duels.subscribe(duelId, second, () => undefined);
+  disconnectSecond();
+  assert.equal(runtime.activeTimerCount(), 1);
+  runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 110_000));
+  disconnectAgain();
+  assert.equal(
+    runtime.activeTimerTimes().includes(
+      new Date(new Date(round.startedAt).getTime() + 130_000).toISOString(),
+    ),
+    false,
+  );
+  assert.equal(
+    runtime.activeTimerTimes().includes(
+      new Date(new Date(round.startedAt).getTime() + 230_000).toISOString(),
+    ),
+    true,
+  );
+
+  runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 200_000));
+  duels.subscribe(duelId, second, () => undefined);
+  assert.equal(
+    events.some((event) => event.type === "game_completed"),
+    false,
+  );
+});
+
+test("disconnected active-round timeouts resolve to zero and reach result wait", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("player-1");
+  const second = guest("player-2");
+  const initialEvents: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  const disconnectFirst = duels.subscribe(duelId, first, (event) =>
+    initialEvents.push(event),
+  );
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(duelId, second, () => undefined);
+  const round = initialEvents.find(
+    (event) => event.type === "round_started",
+  )?.round;
+  assert.ok(round);
+  disconnectFirst();
+  disconnectSecond();
+
+  runtime.fireRoundDeadline(round);
+  await flushAsyncWork();
+  const reconnectEvents: DirectDuelEvent[] = [];
+  duels.subscribe(duelId, first, (event) => reconnectEvents.push(event));
+  const resolved = reconnectEvents.find(
+    (event) => event.type === "round_resolved",
+  );
+  assert.equal(resolved?.results?.length, 2);
+  assert.equal(
+    resolved?.results?.every(
+      (result) =>
+        result.submissionType === "TIMEOUT" &&
+        result.calculatedPopulation === 0,
+    ),
+    true,
+  );
+  assert.equal(
+    reconnectEvents.some(
+      (event) =>
+        event.type === "result_phase_started" &&
+        event.resultPhase !== undefined,
+    ),
+    true,
+  );
+});
+
 test("active-round abandon sends one terminal LOSS/WIN result", async () => {
   const runtime = new FakeRuntime();
   const duels = service(runtime);
@@ -983,6 +1360,69 @@ test("abandon during result waiting cancels auto-advance", async () => {
     events.filter((event) => event.type === "round_started").length,
     1,
   );
+});
+
+test("normal final-round completion wins the race against disconnect timeout", async () => {
+  const runtime = new FakeRuntime();
+  const finalizations: DirectDuelFinalizationInput[] = [];
+  const duels = service(runtime, async (input) => {
+    finalizations.push(input);
+    return { status: "APPLIED", competitiveChanges: [] };
+  });
+  const first = registered("player-1");
+  const second = registered("player-2");
+  const firstEvents: DirectDuelEvent[] = [];
+  const { duelId } = duels.create(first, "EASY");
+  duels.subscribe(duelId, first, (event) => firstEvents.push(event));
+  duels.join(second, duelId);
+  const disconnectSecond = duels.subscribe(
+    duelId,
+    second,
+    () => undefined,
+  );
+
+  for (let roundNumber = 1; roundNumber <= 5; roundNumber += 1) {
+    const round = [...firstEvents]
+      .reverse()
+      .find((event) => event.type === "round_started")?.round;
+    assert.equal(round?.roundNumber, roundNumber);
+    runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 1_000));
+    await duels.submit(
+      duelId,
+      second,
+      roundNumber,
+      "MANUAL",
+      [shape(1_000)],
+      population,
+    );
+    if (roundNumber === 5) {
+      disconnectSecond();
+      runtime.moveTo(new Date(new Date(round.startedAt).getTime() + 2_000));
+    }
+    await duels.submit(
+      duelId,
+      first,
+      roundNumber,
+      "MANUAL",
+      [shape(1_000)],
+      population,
+    );
+    if (roundNumber < 5) {
+      duels.completeResultAnimation(duelId, first, roundNumber);
+      duels.completeResultAnimation(duelId, second, roundNumber);
+      duels.readyForNextRound(duelId, first, roundNumber);
+      duels.readyForNextRound(duelId, second, roundNumber);
+    }
+  }
+
+  assert.equal(finalizations.length, 1);
+  assert.equal(finalizations[0]?.completionReason, "ROUNDS_COMPLETE");
+  assert.equal(
+    firstEvents.find((event) => event.type === "game_completed")
+      ?.completionReason,
+    "ROUNDS_COMPLETE",
+  );
+  assert.equal(runtime.activeTimerCount(), 0);
 });
 
 test("equal five-round totals deliver DRAW to both clients", async () => {

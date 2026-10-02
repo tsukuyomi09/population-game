@@ -15,7 +15,10 @@ import {
 } from "./ranked-visible-progression";
 
 export type RankedDuelOutcome = "WIN" | "LOSS" | "DRAW";
-export type RankedDuelCompletionReason = "ROUNDS_COMPLETE" | "ABANDON";
+export type RankedDuelCompletionReason =
+  | "ROUNDS_COMPLETE"
+  | "ABANDON"
+  | "DISCONNECT_FORFEIT";
 
 export type RankedDuelFinalizationInput = {
   runtimeGameId: string;
@@ -28,6 +31,7 @@ export type RankedDuelFinalizationInput = {
   rounds: readonly RuntimeRoundSnapshot[];
   completionReason: RankedDuelCompletionReason;
   abandonedRuntimePlayerId?: string;
+  forfeitedRuntimePlayerId?: string;
   startedAt: Date;
   endedAt: Date;
 };
@@ -88,15 +92,21 @@ const postgresTransaction: RankedDuelTransaction = async (work) => {
 function playerOutcomes(input: RankedDuelFinalizationInput) {
   const [first, second] = input.players;
 
-  if (input.completionReason === "ABANDON") {
-    const abandonedId = input.abandonedRuntimePlayerId;
+  if (
+    input.completionReason === "ABANDON" ||
+    input.completionReason === "DISCONNECT_FORFEIT"
+  ) {
+    const abandonedId =
+      input.completionReason === "ABANDON"
+        ? input.abandonedRuntimePlayerId
+        : input.forfeitedRuntimePlayerId;
     if (
       !abandonedId ||
       !input.players.some(
         ({ player }) => player.runtimePlayerId === abandonedId,
       )
     ) {
-      throw new Error("Ranked abandon is missing its abandoning player.");
+      throw new Error("Ranked terminal loss is missing its losing player.");
     }
 
     return new Map<string, RankedDuelOutcome>([
@@ -518,7 +528,11 @@ function completeGame(
     `,
     [
       input.runtimeGameId,
-      input.completionReason === "ABANDON" ? "PLAYER_ABANDON" : "NORMAL",
+      input.completionReason === "ABANDON"
+        ? "PLAYER_ABANDON"
+        : input.completionReason === "DISCONNECT_FORFEIT"
+          ? "DISCONNECT_FORFEIT"
+          : "NORMAL",
       input.endedAt,
     ],
   );

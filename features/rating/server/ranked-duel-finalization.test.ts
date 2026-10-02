@@ -30,7 +30,7 @@ type StoredGame = {
   difficulty: "EASY" | "REAL";
   rated: boolean;
   status: "ACTIVE" | "COMPLETED";
-  endReason?: "NORMAL" | "PLAYER_ABANDON";
+  endReason?: "NORMAL" | "PLAYER_ABANDON" | "DISCONNECT_FORFEIT";
 };
 
 type StoredPlayer = {
@@ -265,7 +265,7 @@ class FakeRankedDatabase {
     if (text.includes("ranked-duel:complete-game")) {
       const [gameId, endReason] = values as [
         string,
-        "NORMAL" | "PLAYER_ABANDON",
+        "NORMAL" | "PLAYER_ABANDON" | "DISCONNECT_FORFEIT",
       ];
       const game = this.games.get(gameId);
       if (!game || game.status !== "ACTIVE") {
@@ -537,6 +537,26 @@ test("duplicate abandon cannot apply MMR or placement twice", async () => {
   assert.equal(database.competitiveState("user-b", "EASY")?.mmr, 1_024);
   assert.equal(database.games.get(input.runtimeGameId)?.endReason, "PLAYER_ABANDON");
   assert.equal(database.competitiveStateUpdateCalls, 2);
+});
+
+test("disconnect forfeit applies one normal WIN/LOSS competitive result", async () => {
+  const database = new FakeRankedDatabase();
+  const input = finalization({
+    completionReason: "DISCONNECT_FORFEIT",
+    forfeitedRuntimePlayerId: "runtime-user-b",
+  });
+
+  const result = await finalizeRankedDuel(input, database.transaction);
+
+  assert.equal(result.status, "APPLIED");
+  assert.equal(database.player(input.runtimeGameId, "user-a")?.result, "WIN");
+  assert.equal(database.player(input.runtimeGameId, "user-b")?.result, "LOSS");
+  assert.equal(database.competitiveState("user-a", "EASY")?.rankedGamesCompleted, 1);
+  assert.equal(database.competitiveState("user-b", "EASY")?.rankedGamesCompleted, 1);
+  assert.equal(
+    database.games.get(input.runtimeGameId)?.endReason,
+    "DISCONNECT_FORFEIT",
+  );
 });
 
 test("an all-registered unrated Duel persists without competitive changes", async () => {

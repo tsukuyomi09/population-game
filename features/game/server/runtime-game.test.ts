@@ -386,6 +386,26 @@ test("one ready player waits; both ready players advance immediately", () => {
   assert.equal(game.snapshot().state, "ROUND_ACTIVE");
 });
 
+test("disconnect forfeit is terminal and idempotent during an active round", () => {
+  const first = guest("guest-1");
+  const second = guest("guest-2");
+  const { game } = runtimeGame([first, second], "DUEL");
+  const completedAt = new Date(startedAt.getTime() + 120_000);
+
+  const completed = game.forfeitDisconnectedPlayer(second, completedAt);
+  const duplicate = game.forfeitDisconnectedPlayer(second, completedAt);
+
+  assert.equal(completed.status, "APPLIED");
+  assert.deepEqual(completed.disconnectCompletion, {
+    outcome: "FORFEIT",
+    winnerRuntimePlayerId: first.runtimePlayerId,
+    forfeitedRuntimePlayerId: second.runtimePlayerId,
+    completedAt,
+  });
+  assert.equal(duplicate.status, "DUPLICATE");
+  assert.equal(game.snapshot().state, "COMPLETE");
+});
+
 test("duplicate ready is harmless and stale ready cannot advance another round", () => {
   const first = guest("guest-1");
   const second = guest("guest-2");
