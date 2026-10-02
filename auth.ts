@@ -7,7 +7,11 @@ import {
 } from "./features/account/server/users";
 
 export const { handlers, auth, signIn, signOut } = NextAuth({
-  providers: [Google],
+  providers: [
+    Google({
+      authorization: { params: { prompt: "select_account" } },
+    }),
+  ],
   session: { strategy: "jwt" },
   callbacks: {
     signIn({ account, profile }) {
