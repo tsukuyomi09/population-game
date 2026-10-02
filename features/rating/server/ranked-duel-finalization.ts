@@ -3,9 +3,16 @@ import type { RuntimePlayer } from "../../game/runtime-player";
 import type { RuntimeRoundSnapshot } from "../../game/server/runtime-game";
 import type { GameDifficulty } from "../../game/single-player";
 import {
-  INITIAL_RANKED_RATING,
-  MINIMUM_RANKED_RATING,
-} from "./current-ratings";
+  calculateRankedMmrUpdate,
+  INITIAL_RANKED_MMR,
+  RANKED_PLACEMENT_GAMES,
+} from "./ranked-mmr";
+import {
+  rankedProgress,
+  type RankedProgress,
+  visibleRankScoreAfterMatch,
+  visibleRankScoreFromMmr,
+} from "./ranked-visible-progression";
 
 export type RankedDuelOutcome = "WIN" | "LOSS" | "DRAW";
 export type RankedDuelCompletionReason = "ROUNDS_COMPLETE" | "ABANDON";
@@ -25,17 +32,21 @@ export type RankedDuelFinalizationInput = {
   endedAt: Date;
 };
 
-export type RankedDuelRatingChange = {
+export type RankedDuelCompetitiveChange = {
   userId: string;
   outcome: RankedDuelOutcome;
-  ratingBefore: number;
-  ratingAfter: number;
+  progressBefore: RankedProgress;
+  progressAfter: RankedProgress;
+  lpChange: number | null;
 };
 
 export type RankedDuelFinalizationResult =
   | { status: "SKIPPED_RUNTIME_ONLY" }
   | { status: "DUPLICATE" }
-  | { status: "APPLIED"; ratings: RankedDuelRatingChange[] };
+  | {
+      status: "APPLIED";
+      competitiveChanges: RankedDuelCompetitiveChange[];
+    };
 
 type QueryResult = {
   rows: Record<string, unknown>[];
@@ -73,12 +84,6 @@ const postgresTransaction: RankedDuelTransaction = async (work) => {
     client.release();
   }
 };
-
-function ratingDelta(outcome: RankedDuelOutcome) {
-  if (outcome === "WIN") return 20;
-  if (outcome === "LOSS") return -20;
-  return 0;
-}
 
 function playerOutcomes(input: RankedDuelFinalizationInput) {
   const [first, second] = input.players;
@@ -341,32 +346,35 @@ export async function finalizeRankedDuel(
       if (completed.rowCount !== 1) {
         throw new Error("Duel was already finalized.");
       }
-      return { status: "APPLIED", ratings: [] };
+      return { status: "APPLIED", competitiveChanges: [] };
     }
 
     for (const { player } of playersByUserId) {
       await query(
         `
-          /* ranked-duel:insert-rating */
+          /* ranked-duel:insert-competitive-state */
           INSERT INTO competitive_ratings (
-            user_id, difficulty, rating, updated_at
+            user_id, difficulty, mmr, ranked_games_completed,
+            visible_rank_score, updated_at
           )
-          VALUES ($1, $2, $3, $4)
+          VALUES ($1, $2, $3, 0, NULL, $4)
           ON CONFLICT (user_id, difficulty) DO NOTHING
         `,
         [
           player.userId,
           input.difficulty,
-          INITIAL_RANKED_RATING,
+          INITIAL_RANKED_MMR,
           input.endedAt,
         ],
       );
     }
 
-    const ratingsResult = await query(
+    const competitiveStateResult = await query(
       `
-        /* ranked-duel:lock-ratings */
-        SELECT user_id AS "userId", rating
+        /* ranked-duel:lock-competitive-state */
+        SELECT user_id AS "userId", mmr,
+               ranked_games_completed AS "rankedGamesCompleted",
+               visible_rank_score AS "visibleRankScore"
         FROM competitive_ratings
         WHERE difficulty = $1
           AND user_id = ANY($2::uuid[])
@@ -375,38 +383,87 @@ export async function finalizeRankedDuel(
       `,
       [input.difficulty, expectedUserIds],
     );
-    if (ratingsResult.rows.length !== 2) {
-      throw new Error("Ranked rating rows could not be initialized.");
+    if (competitiveStateResult.rows.length !== 2) {
+      throw new Error("Ranked competitive state rows could not be initialized.");
     }
 
-    const ratingByUserId = new Map(
-      ratingsResult.rows.map((row) => [row.userId as string, row.rating as number]),
+    const competitiveStateByUserId = new Map(
+      competitiveStateResult.rows.map((row) => [row.userId as string, row]),
     );
     const gamePlayerIdByUserId = new Map(
       gamePlayersResult.rows.map((row) => [row.userId as string, row.id as string]),
     );
-    const changes: RankedDuelRatingChange[] = [];
+    const changes: RankedDuelCompetitiveChange[] = [];
 
     for (const { player, totalScore } of playersByUserId) {
       const outcome = outcomes.get(player.runtimePlayerId);
-      const ratingBefore = ratingByUserId.get(player.userId);
+      const competitiveState = competitiveStateByUserId.get(player.userId);
+      const opponent = registeredPlayers.find(
+        ({ player: candidate }) => candidate.userId !== player.userId,
+      );
+      const opponentCompetitiveState = opponent
+        ? competitiveStateByUserId.get(opponent.player.userId)
+        : undefined;
       const gamePlayerId = gamePlayerIdByUserId.get(player.userId);
-      if (!outcome || ratingBefore === undefined || !gamePlayerId) {
+      if (
+        !outcome ||
+        !competitiveState ||
+        !opponentCompetitiveState ||
+        !gamePlayerId
+      ) {
         throw new Error("Ranked finalization state is incomplete.");
       }
-      const ratingAfter = Math.max(
-        MINIMUM_RANKED_RATING,
-        ratingBefore + ratingDelta(outcome),
+      const mmrUpdate = calculateRankedMmrUpdate({
+        mmr: competitiveState.mmr as number,
+        opponentMmr: opponentCompetitiveState.mmr as number,
+        rankedGamesCompleted: competitiveState.rankedGamesCompleted as number,
+        outcome,
+      });
+      const visibleRankScoreBefore = competitiveState.visibleRankScore;
+      if (
+        visibleRankScoreBefore !== null &&
+        (typeof visibleRankScoreBefore !== "number" ||
+          !Number.isInteger(visibleRankScoreBefore))
+      ) {
+        throw new Error("Ranked visible progression is invalid.");
+      }
+      const progressBefore = rankedProgress(
+        mmrUpdate.rankedGamesCompletedBefore,
+        visibleRankScoreBefore as number | null,
+      );
+      const visibleRankScoreAfter =
+        mmrUpdate.rankedGamesCompletedBefore < RANKED_PLACEMENT_GAMES
+          ? mmrUpdate.rankedGamesCompletedAfter === RANKED_PLACEMENT_GAMES
+            ? visibleRankScoreFromMmr(mmrUpdate.mmrAfter)
+            : null
+          : visibleRankScoreAfterMatch({
+              mmrBefore: mmrUpdate.mmrBefore,
+              visibleRankScoreBefore: visibleRankScoreBefore as number,
+              outcome,
+            });
+      const progressAfter = rankedProgress(
+        mmrUpdate.rankedGamesCompletedAfter,
+        visibleRankScoreAfter,
       );
 
       await query(
         `
-          /* ranked-duel:update-rating */
+          /* ranked-duel:update-competitive-state */
           UPDATE competitive_ratings
-          SET rating = $3, updated_at = $4
+          SET mmr = $3,
+              ranked_games_completed = $4,
+              visible_rank_score = $5,
+              updated_at = $6
           WHERE user_id = $1 AND difficulty = $2
         `,
-        [player.userId, input.difficulty, ratingAfter, input.endedAt],
+        [
+          player.userId,
+          input.difficulty,
+          mmrUpdate.mmrAfter,
+          mmrUpdate.rankedGamesCompletedAfter,
+          visibleRankScoreAfter,
+          input.endedAt,
+        ],
       );
       await query(
         `
@@ -414,18 +471,28 @@ export async function finalizeRankedDuel(
           UPDATE game_players
           SET total_score = $2,
               result = $3,
-              rating_before = $4,
-              rating_after = $5
+              mmr_before = $4,
+              mmr_after = $5
           WHERE id = $1
         `,
-        [gamePlayerId, totalScore, outcome, ratingBefore, ratingAfter],
+        [
+          gamePlayerId,
+          totalScore,
+          outcome,
+          mmrUpdate.mmrBefore,
+          mmrUpdate.mmrAfter,
+        ],
       );
 
       changes.push({
         userId: player.userId,
         outcome,
-        ratingBefore,
-        ratingAfter,
+        progressBefore,
+        progressAfter,
+        lpChange:
+          visibleRankScoreBefore === null || visibleRankScoreAfter === null
+            ? null
+            : visibleRankScoreAfter - visibleRankScoreBefore,
       });
     }
 
@@ -434,7 +501,7 @@ export async function finalizeRankedDuel(
       throw new Error("Ranked Duel was already finalized.");
     }
 
-    return { status: "APPLIED", ratings: changes };
+    return { status: "APPLIED", competitiveChanges: changes };
   });
 }
 

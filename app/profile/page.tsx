@@ -6,7 +6,7 @@ import {
   singleProfileStats,
 } from "../../features/account/server/profile-stats";
 import { findUserById } from "../../features/account/server/users";
-import { currentRankedRatings } from "../../features/rating/server/current-ratings";
+import { currentRankedProgress } from "../../features/rating/server/current-ranked-progression";
 
 export default async function ProfilePage() {
   const session = await auth();
@@ -17,7 +17,7 @@ export default async function ProfilePage() {
     user,
     easyStats,
     realStats,
-    rankedRatings,
+    rankedProgress,
     easyDuels,
     easyRanked,
     realDuels,
@@ -26,7 +26,7 @@ export default async function ProfilePage() {
     findUserById(session.worldrawingUserId),
     singleProfileStats(session.worldrawingUserId, "EASY"),
     singleProfileStats(session.worldrawingUserId, "REAL"),
-    currentRankedRatings(session.worldrawingUserId),
+    currentRankedProgress(session.worldrawingUserId),
     duelProfileStats(session.worldrawingUserId, "EASY", "DUEL"),
     duelProfileStats(session.worldrawingUserId, "EASY", "RANKED"),
     duelProfileStats(session.worldrawingUserId, "REAL", "DUEL"),
@@ -39,7 +39,7 @@ export default async function ProfilePage() {
       username={user.username}
       avatarId={user.avatarId}
       stats={{ EASY: easyStats, REAL: realStats }}
-      rankedRatings={rankedRatings}
+      rankedProgress={rankedProgress}
       duelStats={{
         EASY: { DUEL: easyDuels, RANKED: easyRanked },
         REAL: { DUEL: realDuels, RANKED: realRanked },

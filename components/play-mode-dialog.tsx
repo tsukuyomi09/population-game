@@ -130,13 +130,20 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
     setQueuedIntent(null);
   };
 
-  const createInvite = async () => {
+  const createInvite = async (intent: MatchmakingIntent) => {
     if (isCreatingInvite) return;
+    if (intent === "RANKED" && !isRegistered) {
+      setInviteError("Ranked invites require a registered account.");
+      return;
+    }
 
     setIsCreatingInvite(true);
     setInviteError(null);
     try {
-      const invite = await requestDirectDuelInviteCreate(duelDifficulty);
+      const invite = await requestDirectDuelInviteCreate(
+        duelDifficulty,
+        intent,
+      );
       dialogRef.current?.close();
       router.push(
         `/game?duelId=${encodeURIComponent(invite.duelId)}` +
@@ -334,6 +341,23 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
                     {queuedIntent === "RANKED" ? "Ranked" : "1v1"} · {" "}
                     {duelDifficulty === "EASY" ? "Easy" : "Real"}
                   </p>
+                  <p className="mx-auto mt-3 max-w-sm text-xs leading-5 text-muted-foreground">
+                    {queuedIntent === "RANKED"
+                      ? "Searching for the closest available skill match. The search widens gradually within a competitive limit."
+                      : "Waiting for the next available player in this difficulty."}
+                  </p>
+                  <div
+                    className="mt-4 flex items-center justify-center gap-1.5"
+                    aria-hidden="true"
+                  >
+                    {[0, 1, 2].map((step) => (
+                      <span
+                        key={step}
+                        className="size-1.5 animate-pulse rounded-full bg-primary"
+                        style={{ animationDelay: `${step * 180}ms` }}
+                      />
+                    ))}
+                  </div>
                   <Button
                     type="button"
                     variant="outline"
@@ -387,7 +411,7 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
                     <div className="mt-4 grid gap-3 sm:grid-cols-2">
                       <Button
                         type="button"
-                        onClick={() => void createInvite()}
+                        onClick={() => void createInvite("DUEL")}
                         disabled={isCreatingInvite || isJoiningQueue}
                         className="h-12 font-black"
                       >
@@ -406,19 +430,39 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
                       </Button>
                     </div>
                   ) : (
-                    <Button
-                      type="button"
-                      onClick={() => void findPlayer("RANKED")}
-                      disabled={!isRegistered || isJoiningQueue}
-                      className="mt-4 h-12 w-full font-black"
-                    >
-                      <ShieldCheck aria-hidden="true" />
-                      {!isRegistered
-                        ? "Registered account required"
-                        : isJoiningQueue
-                          ? "Joining…"
-                          : "Find Ranked Player"}
-                    </Button>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <Button
+                        type="button"
+                        onClick={() => void createInvite("RANKED")}
+                        disabled={
+                          !isRegistered || isCreatingInvite || isJoiningQueue
+                        }
+                        className="h-12 font-black"
+                      >
+                        <Link2 aria-hidden="true" />
+                        {!isRegistered
+                          ? "Account required"
+                          : isCreatingInvite
+                            ? "Creating…"
+                            : "Invite Player"}
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => void findPlayer("RANKED")}
+                        disabled={
+                          !isRegistered || isCreatingInvite || isJoiningQueue
+                        }
+                        className="h-12 font-black"
+                      >
+                        <UsersRound aria-hidden="true" />
+                        {!isRegistered
+                          ? "Account required"
+                          : isJoiningQueue
+                            ? "Joining…"
+                            : "Find Player"}
+                      </Button>
+                    </div>
                   )}
 
                   <p className="mt-3 text-center text-xs text-muted-foreground">

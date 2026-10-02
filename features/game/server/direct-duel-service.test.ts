@@ -8,9 +8,11 @@ import type {
 } from "../runtime-player";
 import {
   createMatchmadeDuel,
+  directDuelInviteIntent,
   DirectDuelService,
   type DirectDuelEvent,
   type DirectDuelFinalizationInput,
+  type DirectDuelFinalizationResult,
 } from "./direct-duel-service";
 import { MatchmakingService } from "./matchmaking-service";
 
@@ -84,7 +86,9 @@ class FakeRuntime {
 
 function service(
   runtime: FakeRuntime,
-  finalizeDuel?: (input: DirectDuelFinalizationInput) => Promise<unknown>,
+  finalizeDuel?: (
+    input: DirectDuelFinalizationInput,
+  ) => Promise<DirectDuelFinalizationResult | void>,
 ) {
   return new DirectDuelService({
     generateDuelId: () => "duel-1",
@@ -121,6 +125,88 @@ test("guest and registered creators make unrated short-lived invites", () => {
   }
 });
 
+test("client invite input cannot set rated directly", () => {
+  assert.equal(directDuelInviteIntent({ rated: true }), "DUEL");
+  assert.equal(
+    directDuelInviteIntent({ intent: "DUEL", rated: true }),
+    "DUEL",
+  );
+  assert.equal(directDuelInviteIntent({ intent: "RANKED" }), "RANKED");
+  assert.throws(
+    () => directDuelInviteIntent({ intent: "RATED" }),
+    /DUEL or RANKED/,
+  );
+});
+
+test("Ranked invites require two registered players and start exactly once", () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const creator = registered("ranked-creator");
+  const joiner = registered("ranked-joiner");
+  const creatorEvents: DirectDuelEvent[] = [];
+
+  assert.throws(
+    () => duels.createRankedInvite(guest("guest-creator"), "EASY"),
+    /registered players/,
+  );
+
+  const created = duels.createRankedInvite(creator, "REAL");
+  assert.equal(created.status, "WAITING");
+  assert.equal(created.rated, true);
+  assert.equal(created.difficulty, "REAL");
+  assert.doesNotMatch(JSON.stringify(created), /mmr/i);
+  duels.subscribe(created.duelId, creator, (event) =>
+    creatorEvents.push(event),
+  );
+
+  assert.throws(
+    () => duels.joinInvite(guest("guest-joiner"), created.inviteToken),
+    /registered players/,
+  );
+  assert.throws(
+    () => duels.joinInvite(creator, created.inviteToken),
+    /second distinct player/,
+  );
+  assert.equal(runtime.activeTimerCount(), 0);
+
+  const joined = duels.joinInvite(joiner, created.inviteToken);
+  assert.equal(joined.status, "COUNTDOWN");
+  assert.equal(joined.rated, true);
+  assert.equal(joined.players.length, 2);
+  assert.equal(runtime.activeTimerCount(), 1);
+  assert.equal(
+    creatorEvents.filter((event) => event.type === "pre_game_started").length,
+    1,
+  );
+
+  assert.equal(
+    duels.joinInvite(joiner, created.inviteToken).status,
+    "COUNTDOWN",
+  );
+  assert.throws(
+    () =>
+      duels.joinInvite(registered("ranked-third"), created.inviteToken),
+    /already been used/,
+  );
+  assert.equal(runtime.activeTimerCount(), 1);
+
+  runtime.fireNextTimerAt(joined.preGame.endsAt);
+  assert.equal(
+    creatorEvents.filter((event) => event.type === "game_started").length,
+    1,
+  );
+  assert.equal(
+    creatorEvents.find((event) => event.type === "game_started")?.rated,
+    true,
+  );
+  assert.equal(
+    creatorEvents.filter((event) => event.type === "round_started").length,
+    1,
+  );
+  assert.equal(runtime.activeTimerCount(), 1);
+  assert.doesNotMatch(JSON.stringify(creatorEvents), /mmr/i);
+});
+
 test("matchmaking creates a Duel retrievable through the canonical runtime lookup", () => {
   const runtime = new FakeRuntime();
   const duels = service(runtime);
@@ -137,8 +223,11 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
   );
   const first = registered("member-a");
   const second = registered("member-b");
-  assert.equal(matchmaking.join(first, "RANKED", "REAL").status, "WAITING");
-  const created = matchmaking.join(second, "RANKED", "REAL");
+  assert.equal(
+    matchmaking.join(first, "RANKED", "REAL", 1_000).status,
+    "WAITING",
+  );
+  const created = matchmaking.join(second, "RANKED", "REAL", 1_000);
   const events: DirectDuelEvent[] = [];
 
   assert.equal(created.status, "MATCHED");
@@ -170,29 +259,67 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
         "EASY",
         true,
       ),
-    /requires registered players/,
+    /require registered players/,
   );
 });
 
-test("Ranked abandon invokes terminal persistence exactly once", async () => {
+test("Ranked invite abandon invokes terminal persistence exactly once", async () => {
   const runtime = new FakeRuntime();
   const finalizations: DirectDuelFinalizationInput[] = [];
   const duels = service(runtime, async (input) => {
     finalizations.push(input);
+    return {
+      status: "APPLIED",
+      competitiveChanges: [
+        {
+          userId: "member-a-user",
+          outcome: "LOSS",
+          progressBefore: {
+            status: "RANKED",
+            rankedGamesCompleted: 10,
+            tier: "SILVER",
+            division: "II",
+            label: "Silver II",
+            lp: 44,
+          },
+          progressAfter: {
+            status: "RANKED",
+            rankedGamesCompleted: 10,
+            tier: "SILVER",
+            division: "II",
+            label: "Silver II",
+            lp: 28,
+          },
+          lpChange: -16,
+        },
+        {
+          userId: "member-b-user",
+          outcome: "WIN",
+          progressBefore: {
+            status: "UNRANKED",
+            rankedGamesCompleted: 8,
+            placementsRequired: 10,
+          },
+          progressAfter: {
+            status: "UNRANKED",
+            rankedGamesCompleted: 9,
+            placementsRequired: 10,
+          },
+          lpChange: null,
+        },
+      ],
+    };
   });
   const first = registered("member-a");
   const second = registered("member-b");
-  const created = createMatchmadeDuel(
-    duels,
-    first,
-    second,
-    "REAL",
-    true,
-  );
+  const firstEvents: DirectDuelEvent[] = [];
+  const invitation = duels.createRankedInvite(first, "REAL");
+  const created = duels.joinInvite(second, invitation.inviteToken);
   if (created.status !== "COUNTDOWN") {
     throw new Error("Ranked match did not enter its pre-game countdown.");
   }
   runtime.fireNextTimerAt(created.preGame.endsAt);
+  duels.subscribe(created.duelId, first, (event) => firstEvents.push(event));
 
   assert.equal((await duels.abandon(created.duelId, first)).status, "APPLIED");
   assert.equal((await duels.abandon(created.duelId, first)).status, "DUPLICATE");
@@ -205,6 +332,27 @@ test("Ranked abandon invokes terminal persistence exactly once", async () => {
     first.runtimePlayerId,
   );
   assert.equal(finalizations[0]?.rounds.length, 1);
+  const completed = firstEvents.find((event) => event.type === "game_completed");
+  assert.deepEqual(completed?.rankedProgress, {
+    before: {
+      status: "RANKED",
+      rankedGamesCompleted: 10,
+      tier: "SILVER",
+      division: "II",
+      label: "Silver II",
+      lp: 44,
+    },
+    after: {
+      status: "RANKED",
+      rankedGamesCompleted: 10,
+      tier: "SILVER",
+      division: "II",
+      label: "Silver II",
+      lp: 28,
+    },
+    lpChange: -16,
+  });
+  assert.doesNotMatch(JSON.stringify(completed), /mmr/i);
 });
 
 test("invite identity combinations join the same Duel and start once after countdown", async (t) => {

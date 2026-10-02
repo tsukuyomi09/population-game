@@ -25,6 +25,43 @@ export type DirectDuelRound = {
 export type DirectDuelOutcome = "WIN" | "LOSS" | "DRAW";
 export type DirectDuelCompletionReason = "ROUNDS_COMPLETE" | "ABANDON";
 
+export type DirectDuelRankedProgress =
+  | {
+      status: "UNRANKED";
+      rankedGamesCompleted: number;
+      placementsRequired: 10;
+    }
+  | {
+      status: "RANKED";
+      rankedGamesCompleted: 10;
+      tier:
+        | "BRONZE"
+        | "SILVER"
+        | "GOLD"
+        | "PLATINUM"
+        | "DIAMOND"
+        | "MASTER";
+      division: "III" | "II" | "I" | null;
+      label: string;
+      lp: number;
+    };
+
+export type DirectDuelCompetitiveChange = {
+  userId: string;
+  outcome: DirectDuelOutcome;
+  progressBefore: DirectDuelRankedProgress;
+  progressAfter: DirectDuelRankedProgress;
+  lpChange: number | null;
+};
+
+export type DirectDuelFinalizationResult =
+  | { status: "SKIPPED_RUNTIME_ONLY" }
+  | { status: "DUPLICATE" }
+  | {
+      status: "APPLIED";
+      competitiveChanges: DirectDuelCompetitiveChange[];
+    };
+
 export type DirectDuelResultPhase = {
   roundNumber: number;
   startedAt: string;
@@ -89,6 +126,11 @@ export type DirectDuelEvent = {
   abandonedRuntimePlayerId?: string;
   totalScore?: number;
   opponentTotalScore?: number;
+  rankedProgress?: {
+    before: DirectDuelRankedProgress;
+    after: DirectDuelRankedProgress;
+    lpChange: number | null;
+  };
 };
 
 type DirectDuelSession = {
@@ -128,7 +170,9 @@ type DirectDuelServiceOptions = {
   resultPhaseDurationMs: number;
   now: () => Date;
   schedule: (callback: () => void, delayMs: number) => () => void;
-  finalizeDuel?: (input: DirectDuelFinalizationInput) => Promise<unknown>;
+  finalizeDuel?: (
+    input: DirectDuelFinalizationInput,
+  ) => Promise<DirectDuelFinalizationResult | void>;
 };
 
 type CalculatePopulation = (shapes: PopulationShape[]) => Promise<number>;
@@ -140,6 +184,14 @@ export class DirectDuelError extends Error {
   ) {
     super(message);
   }
+}
+
+export function directDuelInviteIntent(body: Record<string, unknown>) {
+  if (body.intent === undefined || body.intent === "DUEL") {
+    return "DUEL" as const;
+  }
+  if (body.intent === "RANKED") return "RANKED" as const;
+  throw new DirectDuelError("Invite intent must be DUEL or RANKED.", 400);
 }
 
 function samePlayer(left: RuntimePlayer, right: RuntimePlayer) {
@@ -212,18 +264,26 @@ export class DirectDuelService {
     };
   }
 
-  createInvite(
-    player: RuntimePlayer,
-    difficulty: GameDifficulty,
-    rated = false,
-  ) {
-    if (rated && player.kind !== "registered") {
+  createInvite(player: RuntimePlayer, difficulty: GameDifficulty) {
+    return this.createInviteSession(player, difficulty, false);
+  }
+
+  createRankedInvite(player: RuntimePlayer, difficulty: GameDifficulty) {
+    if (player.kind !== "registered") {
       throw new DirectDuelError(
-        "Ranked matchmaking requires registered players.",
+        "Ranked Duels require registered players.",
         403,
       );
     }
 
+    return this.createInviteSession(player, difficulty, true);
+  }
+
+  private createInviteSession(
+    player: RuntimePlayer,
+    difficulty: GameDifficulty,
+    rated: boolean,
+  ) {
     const session = this.createSession(player, difficulty, "INVITE", rated);
     const inviteToken = this.options.generateInviteToken();
     if (this.invites.has(inviteToken)) {
@@ -333,7 +393,7 @@ export class DirectDuelService {
     }
     if (session.rated && player.kind !== "registered") {
       throw new DirectDuelError(
-        "Ranked matchmaking requires registered players.",
+        "Ranked Duels require registered players.",
         403,
       );
     }
@@ -783,6 +843,7 @@ export class DirectDuelService {
   private sendCompletion(
     session: DirectDuelSession,
     snapshot: RuntimeGameSnapshot,
+    finalizationResult: DirectDuelFinalizationResult | void,
   ) {
     const [first, second] = session.players;
     const firstTotal = snapshot.totals[first.runtimePlayerId] ?? 0;
@@ -800,6 +861,23 @@ export class DirectDuelService {
         ? "LOSS"
         : "WIN"
       : outcome(secondTotal, firstTotal);
+    const competitiveChanges =
+      finalizationResult?.status === "APPLIED"
+        ? finalizationResult.competitiveChanges
+        : [];
+    const progressFor = (player: RuntimePlayer) => {
+      if (player.kind !== "registered") return undefined;
+      const change = competitiveChanges.find(
+        ({ userId }) => userId === player.userId,
+      );
+      return change
+        ? {
+            before: change.progressBefore,
+            after: change.progressAfter,
+            lpChange: change.lpChange,
+          }
+        : undefined;
+    };
 
     this.sendToPlayer(session, first.runtimePlayerId, {
       type: "game_completed",
@@ -810,6 +888,7 @@ export class DirectDuelService {
       totalScore: firstTotal,
       opponentTotalScore: secondTotal,
       totals: snapshot.totals,
+      rankedProgress: progressFor(first),
     });
     this.sendToPlayer(session, second.runtimePlayerId, {
       type: "game_completed",
@@ -820,6 +899,7 @@ export class DirectDuelService {
       totalScore: secondTotal,
       opponentTotalScore: firstTotal,
       totals: snapshot.totals,
+      rankedProgress: progressFor(second),
     });
   }
 
@@ -838,7 +918,7 @@ export class DirectDuelService {
         throw new Error("Completed Duel is missing finalization state.");
       }
 
-      await this.options.finalizeDuel?.({
+      const finalizationResult = await this.options.finalizeDuel?.({
         runtimeGameId: session.duelId,
         difficulty: session.difficulty,
         rated: session.rated,
@@ -875,7 +955,7 @@ export class DirectDuelService {
           },
         );
       }
-      this.sendCompletion(session, snapshot);
+      this.sendCompletion(session, snapshot, finalizationResult);
       session.completionSent = true;
     })();
 
@@ -953,6 +1033,8 @@ export function createMatchmadeDuel(
   difficulty: GameDifficulty,
   rated: boolean,
 ) {
-  const invitation = duels.createInvite(firstPlayer, difficulty, rated);
+  const invitation = rated
+    ? duels.createRankedInvite(firstPlayer, difficulty)
+    : duels.createInvite(firstPlayer, difficulty);
   return duels.joinInvite(secondPlayer, invitation.inviteToken);
 }

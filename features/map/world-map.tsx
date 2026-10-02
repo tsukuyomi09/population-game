@@ -28,6 +28,7 @@ import {
   type GoogleMapsNamespace,
 } from "./google-drawing-map-adapter";
 import { Button } from "@/components/ui/button";
+import { RankedResultProgress } from "@/components/ranked-progress-display";
 import { avatarDefinition } from "@/features/account/avatars";
 import { cn } from "@/lib/utils";
 import { createDraw, type DrawController } from "../drawing/draw";
@@ -463,6 +464,9 @@ export function WorldMap({
   const [duelReadyPlayerIds, setDuelReadyPlayerIds] = useState<string[]>([]);
   const [isDuelReadyPending, setIsDuelReadyPending] = useState(false);
   const [duelOutcome, setDuelOutcome] = useState<DirectDuelOutcome | null>(null);
+  const [duelRankedProgress, setDuelRankedProgress] = useState<
+    NonNullable<DirectDuelEvent["rankedProgress"]> | null
+  >(null);
   const [duelAbandonRole, setDuelAbandonRole] = useState<
     "SELF" | "OPPONENT" | null
   >(null);
@@ -863,6 +867,7 @@ export function WorldMap({
         if (event.difficulty) setDifficulty(event.difficulty);
         if (typeof event.rated === "boolean") setDuelRated(event.rated);
         setDuelPreGame(null);
+        setDuelRankedProgress(null);
       }
 
       if (event.type === "round_started" && event.round) {
@@ -975,6 +980,7 @@ export function WorldMap({
         }
         setIsDuelAbandonPending(false);
         setDuelOutcome(event.outcome);
+        setDuelRankedProgress(event.rankedProgress ?? null);
         setTotalScore(event.totalScore ?? 0);
         setOpponentTotalScore(event.opponentTotalScore ?? 0);
         setDuelRound(null);
@@ -1629,6 +1635,14 @@ export function WorldMap({
                 </div>
               </dl>
 
+              {duelRated && duelRankedProgress && (
+                <RankedResultProgress
+                  before={duelRankedProgress.before}
+                  after={duelRankedProgress.after}
+                  lpChange={duelRankedProgress.lpChange}
+                />
+              )}
+
               <div className="mt-7">
                 <ScoreProgress scores={roundScores} />
               </div>
@@ -1789,8 +1803,9 @@ export function WorldMap({
                     {inviteLink ? (
                       <>
                         <p className="mt-5 text-sm text-muted-foreground">
-                          Share this short-lived link with the player you want to
-                          challenge.
+                          {duelRated
+                            ? "Share this short-lived link with a registered player. This rated match uses normal Ranked progression."
+                            : "Share this short-lived link with the player you want to challenge."}
                         </p>
                         <div className="mt-3 flex gap-2 rounded-lg border border-border bg-black/35 p-2">
                           <code className="min-w-0 flex-1 truncate px-2 py-2 text-left font-mono text-xs text-sky-200">

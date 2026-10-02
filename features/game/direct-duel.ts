@@ -23,6 +23,8 @@ type DirectDuelInviteStart = DirectDuelStart & {
   inviteExpiresAt: string;
 };
 
+export type DirectDuelInviteIntent = "DUEL" | "RANKED";
+
 async function postDirectDuelAction(body: Record<string, unknown>) {
   const response = await fetch("/api/duel/direct", {
     method: "POST",
@@ -94,9 +96,10 @@ export async function requestDirectDuelJoin(duelId: string) {
 
 export async function requestDirectDuelInviteCreate(
   difficulty: GameDifficulty,
+  intent: DirectDuelInviteIntent = "DUEL",
 ) {
   return directDuelInviteStart(
-    await postDirectDuelAction({ action: "CREATE_INVITE", difficulty }),
+    await postDirectDuelAction({ action: "CREATE_INVITE", difficulty, intent }),
   );
 }
 

@@ -10,6 +10,10 @@ import {
 } from "lucide-react";
 import { auth, signIn } from "../auth";
 import { PlayModeDialog } from "@/components/play-mode-dialog";
+import {
+  RankedLpProgress,
+  RankedTierBadge,
+} from "@/components/ranked-progress-display";
 import { Button } from "@/components/ui/button";
 import { avatarDefinition } from "@/features/account/avatars";
 import type { GameDifficulty } from "@/features/game/single-player";
@@ -340,7 +344,7 @@ function RankedLeaderboard({
         </p>
       ) : result.entries.length === 0 ? (
         <p className="px-6 py-12 text-center text-sm text-muted-foreground">
-          No rated players yet. The first ranking is yours to claim.
+          No ranked players yet. Complete placements to claim the first spot.
         </p>
       ) : (
         <div className="overflow-x-auto">
@@ -354,7 +358,7 @@ function RankedLeaderboard({
                   Player
                 </th>
                 <th scope="col" className="px-5 py-3 text-right font-bold sm:px-6">
-                  Rating
+                  Rank / LP
                 </th>
               </tr>
             </thead>
@@ -390,8 +394,19 @@ function RankedLeaderboard({
                         </span>
                       </div>
                     </td>
-                    <td className="px-5 py-3.5 text-right font-mono text-sm font-black sm:px-6">
-                      {entry.rating.toLocaleString("en-US")}
+                    <td className="px-5 py-3.5 sm:px-6">
+                      <div className="ml-auto w-36 text-right">
+                        <RankedTierBadge
+                          tier={entry.tier}
+                          label={entry.label}
+                          compact
+                        />
+                        <RankedLpProgress
+                          tier={entry.tier}
+                          lp={entry.lp}
+                          compact
+                        />
+                      </div>
                     </td>
                   </tr>
                 );
@@ -485,14 +500,14 @@ export default async function Home() {
             <div className="mt-12 mb-8 flex items-end justify-between gap-5">
               <div>
                 <p className="text-xs font-bold tracking-[0.2em] text-primary uppercase">
-                  Competitive ratings
+                  Competitive ranks
                 </p>
                 <h2 className="mt-2 text-3xl font-black tracking-tight sm:text-4xl">
                   Top Ranked players
                 </h2>
               </div>
               <span className="hidden font-mono text-xs text-muted-foreground sm:block">
-                CURRENT RATING
+                RANK + LP
               </span>
             </div>
 

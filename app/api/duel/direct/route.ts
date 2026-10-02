@@ -1,4 +1,5 @@
 import {
+  directDuelInviteIntent,
   DirectDuelError,
   type DirectDuelEvent,
 } from "../../../../features/game/server/direct-duel-service";
@@ -76,11 +77,12 @@ export async function POST(request: Request) {
       if (!isGameDifficulty(difficulty)) {
         throw new DirectDuelError("Difficulty must be EASY or REAL.", 400);
       }
+      const intent = directDuelInviteIntent(body);
+      const profiledPlayer = await playerWithProfile(player);
       return Response.json(
-        directDuels().createInvite(
-          await playerWithProfile(player),
-          difficulty,
-        ),
+        intent === "RANKED"
+          ? directDuels().createRankedInvite(profiledPlayer, difficulty)
+          : directDuels().createInvite(profiledPlayer, difficulty),
       );
     }
 

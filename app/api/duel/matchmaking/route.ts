@@ -8,6 +8,7 @@ import {
 import { matchmaking } from "../../../../features/game/server/matchmaking";
 import { currentRuntimePlayer } from "../../../../features/game/server/player-session";
 import { isGameDifficulty } from "../../../../features/game/single-player";
+import { currentRankedMmr } from "../../../../features/rating/server/current-ranked-mmr";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -48,11 +49,18 @@ export async function POST(request: Request) {
       if (!isGameDifficulty(body.difficulty)) {
         throw new MatchmakingError("Difficulty must be EASY or REAL.", 400);
       }
+      const intent = matchmakingIntent(body.intent);
+      const profiledPlayer = await playerWithProfile(player);
+      const rankedMmr =
+        intent === "RANKED" && profiledPlayer.kind === "registered"
+          ? await currentRankedMmr(profiledPlayer.userId, body.difficulty)
+          : undefined;
       return Response.json(
         matchmaking().join(
-          await playerWithProfile(player),
-          matchmakingIntent(body.intent),
+          profiledPlayer,
+          intent,
           body.difficulty,
+          rankedMmr,
         ),
       );
     }

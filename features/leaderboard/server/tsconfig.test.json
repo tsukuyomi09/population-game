@@ -16,6 +16,8 @@
     "single-leaderboard.test.ts",
     "single-leaderboard.ts",
     "../../database/server/client.ts",
-    "../../game/single-player.ts"
+    "../../game/single-player.ts",
+    "../../rating/server/ranked-mmr.ts",
+    "../../rating/server/ranked-visible-progression.ts"
   ]
 }
