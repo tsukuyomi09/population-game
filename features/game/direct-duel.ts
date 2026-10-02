@@ -25,6 +25,15 @@ type DirectDuelInviteStart = DirectDuelStart & {
 
 export type DirectDuelInviteIntent = "DUEL" | "RANKED";
 
+export type ActiveDirectDuelState =
+  | { status: "NONE" }
+  | {
+      status: "ACTIVE";
+      duelId: string;
+      difficulty: GameDifficulty;
+      rated: boolean;
+    };
+
 async function postDirectDuelAction(body: Record<string, unknown>) {
   const response = await fetch("/api/duel/direct", {
     method: "POST",
@@ -151,4 +160,29 @@ export async function requestDirectDuelAbandon(duelId: string) {
     action: "ABANDON",
     duelId,
   });
+}
+
+export async function requestActiveDirectDuel() {
+  const response = await fetch("/api/duel/direct", { cache: "no-store" });
+  const data = (await response.json()) as Record<string, unknown>;
+  if (!response.ok) {
+    throw new Error(
+      typeof data.error === "string" ? data.error : "Could not load match.",
+    );
+  }
+  if (data.status === "NONE") return { status: "NONE" } as const;
+  if (
+    data.status !== "ACTIVE" ||
+    typeof data.duelId !== "string" ||
+    !isGameDifficulty(data.difficulty) ||
+    typeof data.rated !== "boolean"
+  ) {
+    throw new Error("Active Duel response is invalid.");
+  }
+  return {
+    status: "ACTIVE",
+    duelId: data.duelId,
+    difficulty: data.difficulty,
+    rated: data.rated,
+  } satisfies ActiveDirectDuelState;
 }

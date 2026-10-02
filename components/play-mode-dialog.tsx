@@ -19,7 +19,12 @@ import {
   isDesktopPlayViewport,
 } from "@/components/desktop-play-gate";
 import { Button } from "@/components/ui/button";
-import { requestDirectDuelInviteCreate } from "@/features/game/direct-duel";
+import {
+  requestActiveDirectDuel,
+  requestDirectDuelAbandon,
+  requestDirectDuelInviteCreate,
+  type ActiveDirectDuelState,
+} from "@/features/game/direct-duel";
 import {
   requestMatchmakingJoin,
   requestMatchmakingLeave,
@@ -67,25 +72,44 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
   const [queuedAttempt, setQueuedAttempt] =
     useState<MatchmakingWaiting | null>(null);
   const queuedAttemptRef = useRef<MatchmakingWaiting | null>(null);
+  const joiningAttemptRef = useRef<string | null>(null);
   const transitioningAttemptRef = useRef<string | null>(null);
   const queuedIntent = queuedAttempt?.intent ?? null;
   const [inviteError, setInviteError] = useState<string | null>(null);
+  const [activeDuel, setActiveDuel] = useState<Extract<
+    ActiveDirectDuelState,
+    { status: "ACTIVE" }
+  > | null>(null);
+  const [isAbandoning, setIsAbandoning] = useState(false);
 
-  const enterMatch = async (match: MatchmakingMatch) => {
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void requestActiveDirectDuel()
+        .then((state) => {
+          if (active) setActiveDuel(state.status === "ACTIVE" ? state : null);
+        })
+        .catch(() => undefined);
+    };
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    refresh();
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      active = false;
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
+  }, []);
+
+  const enterMatch = (match: MatchmakingMatch) => {
     if (transitioningAttemptRef.current) return;
     transitioningAttemptRef.current = match.attemptId;
-
-    try {
-      await requestMatchmakingMatchAcknowledge(match.attemptId, match.duelId);
-    } catch (error) {
-      transitioningAttemptRef.current = null;
-      setInviteError(
-        error instanceof Error
-          ? error.message
-          : "Could not confirm the matchmaking result.",
-      );
-      return;
-    }
+    void requestMatchmakingMatchAcknowledge(match.attemptId, match.duelId).catch(
+      () => undefined,
+    );
 
     if (queuedAttemptRef.current?.attemptId === match.attemptId) {
       queuedAttemptRef.current = null;
@@ -125,15 +149,36 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
   }, [queuedAttempt]);
 
   const findPlayer = async (intent: MatchmakingIntent) => {
-    if (isJoiningQueue || queuedAttemptRef.current) return;
+    if (isJoiningQueue || queuedAttemptRef.current || joiningAttemptRef.current) {
+      return;
+    }
 
+    const attemptId = crypto.randomUUID();
+    joiningAttemptRef.current = attemptId;
     setIsJoiningQueue(true);
     setInviteError(null);
     try {
-      const state = await requestMatchmakingJoin(intent, duelDifficulty);
+      const state = await requestMatchmakingJoin(
+        intent,
+        duelDifficulty,
+        attemptId,
+      );
+      if (joiningAttemptRef.current !== attemptId) {
+        if (state.status === "MATCHED") {
+          setActiveDuel({
+            status: "ACTIVE",
+            duelId: state.duelId,
+            difficulty: state.difficulty,
+            rated: state.rated,
+          });
+        }
+        void requestMatchmakingLeave(attemptId).catch(() => undefined);
+        return;
+      }
+      joiningAttemptRef.current = null;
       if (state.status === "MATCHED") {
-        await enterMatch(state);
-      } else {
+        enterMatch(state);
+      } else if (state.status === "WAITING") {
         queuedAttemptRef.current = state;
         setQueuedAttempt(state);
       }
@@ -142,26 +187,63 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
         error instanceof Error ? error.message : "Could not join matchmaking.",
       );
     } finally {
-      setIsJoiningQueue(false);
+      if (
+        joiningAttemptRef.current === attemptId ||
+        joiningAttemptRef.current === null
+      ) {
+        if (joiningAttemptRef.current === attemptId) {
+          joiningAttemptRef.current = null;
+        }
+        setIsJoiningQueue(false);
+      }
     }
   };
 
   const cancelMatchmaking = async () => {
     const attempt = queuedAttemptRef.current;
-    if (!attempt) return;
+    const joiningAttemptId = joiningAttemptRef.current;
+    const attemptId = attempt?.attemptId ?? joiningAttemptId;
+    if (!attemptId) return;
+
+    joiningAttemptRef.current = null;
+    if (attempt) {
+      queuedAttemptRef.current = null;
+      setQueuedAttempt(null);
+    }
 
     try {
-      const state = await requestMatchmakingLeave(attempt.attemptId);
+      const state = await requestMatchmakingLeave(attemptId);
       if (state.status === "MATCHED") {
-        await enterMatch(state);
+        if (attempt) enterMatch(state);
+        else {
+          setActiveDuel({
+            status: "ACTIVE",
+            duelId: state.duelId,
+            difficulty: state.difficulty,
+            rated: state.rated,
+          });
+        }
         return;
       }
     } catch {
-      // Closing the EventSource also removes an unmatched queue entry server-side.
+      // The attempt id remains known, so a late JOIN response retries LEAVE.
     }
-    if (queuedAttemptRef.current?.attemptId === attempt.attemptId) {
-      queuedAttemptRef.current = null;
-      setQueuedAttempt(null);
+  };
+
+  const abandonActiveDuel = async () => {
+    if (!activeDuel || isAbandoning) return;
+    setIsAbandoning(true);
+    setInviteError(null);
+    try {
+      await requestDirectDuelAbandon(activeDuel.duelId);
+      const state = await requestActiveDirectDuel();
+      setActiveDuel(state.status === "ACTIVE" ? state : null);
+    } catch (error) {
+      setInviteError(
+        error instanceof Error ? error.message : "Could not abandon match.",
+      );
+    } finally {
+      setIsAbandoning(false);
     }
   };
 
@@ -192,6 +274,42 @@ export function PlayModeDialog({ isRegistered }: { isRegistered: boolean }) {
       setIsCreatingInvite(false);
     }
   };
+
+  if (activeDuel) {
+    return (
+      <div className="w-full rounded-xl border border-primary/30 bg-primary/8 p-4 sm:w-auto">
+        <p className="text-sm font-black">Match in progress</p>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <Button
+            type="button"
+            size="lg"
+            className="h-12 font-black"
+            onClick={() =>
+              router.push(
+                `/game?duelId=${encodeURIComponent(activeDuel.duelId)}` +
+                  `&difficulty=${activeDuel.difficulty}`,
+              )
+            }
+          >
+            Return to game
+          </Button>
+          <Button
+            type="button"
+            size="lg"
+            variant="outline"
+            className="h-12 font-black"
+            disabled={isAbandoning}
+            onClick={() => void abandonActiveDuel()}
+          >
+            {isAbandoning ? "Abandoning…" : "Abandon match"}
+          </Button>
+        </div>
+        {inviteError && (
+          <p className="mt-3 text-sm text-destructive">{inviteError}</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <>

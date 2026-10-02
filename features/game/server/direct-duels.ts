@@ -15,7 +15,7 @@ const DIRECT_DUEL_RESULT_PHASE_DURATION_MS = 10_000;
 const DIRECT_DUEL_DISCONNECT_TIMEOUT_MS = 120_000;
 const DIRECT_DUEL_INVITE_TTL_MS = 10 * 60_000;
 const DIRECT_DUEL_PRE_GAME_DURATION_MS = 5_000;
-export const DIRECT_DUEL_API_VERSION = 7;
+export const DIRECT_DUEL_API_VERSION = 8;
 
 const globalForDirectDuels = globalThis as typeof globalThis & {
   worldrawingDirectDuels?: DirectDuelService;

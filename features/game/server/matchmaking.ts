@@ -2,6 +2,7 @@ import "server-only";
 import {
   createMatchmadeDuel,
   DIRECT_DUEL_API_VERSION,
+  directDuels,
 } from "./direct-duels";
 import { MatchmakingService } from "./matchmaking-service";
 
@@ -20,6 +21,7 @@ export function matchmaking() {
   ) {
     globalForMatchmaking.worldrawingMatchmaking = new MatchmakingService(
       createMatchmadeDuel,
+      { hasActiveDuel: (player) => directDuels().hasActiveDuel(player) },
     );
     globalForMatchmaking.worldrawingMatchmakingApiVersion =
       MATCHMAKING_API_VERSION;

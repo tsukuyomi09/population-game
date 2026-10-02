@@ -46,6 +46,8 @@ type CreateMatchmadeDuel = (
 type MatchmakingServiceOptions = {
   now?: () => number;
   schedule?: (callback: () => void, delayMs: number) => () => void;
+  transportGraceMs?: number;
+  hasActiveDuel?: (player: RuntimePlayer) => boolean;
 };
 
 type RankedPair = {
@@ -97,11 +99,19 @@ export class MatchmakingService {
     string,
     { cancel: () => void }
   >();
+  private readonly transportCleanupTimers = new Map<
+    string,
+    Map<string, { cancel: () => void }>
+  >();
+  private readonly cancelledAttempts = new Map<string, Set<string>>();
   private readonly now: () => number;
   private readonly schedule: (
     callback: () => void,
     delayMs: number,
   ) => () => void;
+  private readonly transportGraceMs: number;
+  private readonly hasActiveDuel: (player: RuntimePlayer) => boolean;
+  private readonly tracksActiveDuelOwnership: boolean;
   private nextSequence = 0;
 
   constructor(
@@ -116,6 +126,9 @@ export class MatchmakingService {
         timer.unref();
         return () => clearTimeout(timer);
       });
+    this.transportGraceMs = options.transportGraceMs ?? 15_000;
+    this.tracksActiveDuelOwnership = Boolean(options.hasActiveDuel);
+    this.hasActiveDuel = options.hasActiveDuel ?? (() => false);
   }
 
   join(
@@ -123,7 +136,21 @@ export class MatchmakingService {
     intent: MatchmakingIntent,
     difficulty: GameDifficulty,
     rankedMmr?: number,
-  ): MatchmakingState {
+  ): MatchmakingState;
+  join(
+    player: RuntimePlayer,
+    intent: MatchmakingIntent,
+    difficulty: GameDifficulty,
+    rankedMmr: number | undefined,
+    requestedAttemptId: string,
+  ): MatchmakingEvent;
+  join(
+    player: RuntimePlayer,
+    intent: MatchmakingIntent,
+    difficulty: GameDifficulty,
+    rankedMmr?: number,
+    requestedAttemptId?: string,
+  ): MatchmakingEvent {
     if (intent === "RANKED" && player.kind !== "registered") {
       throw new MatchmakingError(
         "Ranked matchmaking requires a registered account.",
@@ -132,7 +159,19 @@ export class MatchmakingService {
     }
 
     const pendingMatch = this.pendingMatches.get(player.runtimePlayerId);
-    if (pendingMatch) return pendingMatch;
+    if (pendingMatch) {
+      if (!this.tracksActiveDuelOwnership || this.hasActiveDuel(player)) {
+        return pendingMatch;
+      }
+      this.pendingMatches.delete(player.runtimePlayerId);
+    }
+
+    if (this.hasActiveDuel(player)) {
+      throw new MatchmakingError(
+        "A match is already in progress for this player.",
+        409,
+      );
+    }
 
     const existing = this.entriesByPlayer.get(player.runtimePlayerId);
     if (existing) {
@@ -160,10 +199,15 @@ export class MatchmakingService {
       throw new MatchmakingError("Ranked matchmaking MMR is invalid.", 500);
     }
 
+    const attemptId = requestedAttemptId ?? randomUUID();
+    if (this.cancelledAttempts.get(player.runtimePlayerId)?.has(attemptId)) {
+      return { status: "LEFT", attemptId };
+    }
+
     const key = queueKey(intent, difficulty);
     const queue = this.queues.get(key) ?? [];
     const entry: QueueEntry = {
-      attemptId: randomUUID(),
+      attemptId,
       player,
       intent,
       difficulty,
@@ -178,6 +222,13 @@ export class MatchmakingService {
       this.entriesByPlayer.set(player.runtimePlayerId, entry);
       this.reevaluateRankedQueue(key);
 
+      if (
+        requestedAttemptId &&
+        this.entriesByPlayer.get(player.runtimePlayerId) === entry
+      ) {
+        this.scheduleTransportCleanup(player.runtimePlayerId, entry.attemptId);
+      }
+
       const match = this.pendingMatches.get(player.runtimePlayerId);
       if (match) {
         return match;
@@ -190,12 +241,16 @@ export class MatchmakingService {
       };
     }
 
+    this.removeUnavailableEntries(queue);
     const opponent = queue.shift();
 
     if (!opponent) {
       queue.push(entry);
       this.queues.set(key, queue);
       this.entriesByPlayer.set(player.runtimePlayerId, entry);
+      if (requestedAttemptId) {
+        this.scheduleTransportCleanup(player.runtimePlayerId, entry.attemptId);
+      }
       return {
         status: "WAITING",
         attemptId: entry.attemptId,
@@ -250,9 +305,13 @@ export class MatchmakingService {
     if (match?.attemptId === attemptId) return match;
 
     const entry = this.entriesByPlayer.get(player.runtimePlayerId);
-    if (entry?.attemptId !== attemptId) return { status: "LEFT", attemptId };
+    if (entry?.attemptId !== attemptId) {
+      this.rememberCancelledAttempt(player.runtimePlayerId, attemptId);
+      return { status: "LEFT", attemptId };
+    }
 
     this.removeEntry(entry);
+    this.rememberCancelledAttempt(player.runtimePlayerId, attemptId);
     const event: MatchmakingEvent = { status: "LEFT", attemptId };
     this.emit(player.runtimePlayerId, attemptId, event);
     return event;
@@ -276,6 +335,7 @@ export class MatchmakingService {
     attemptId: string,
     listener: (event: MatchmakingEvent) => void,
   ) {
+    this.cancelTransportCleanup(player.runtimePlayerId, attemptId);
     let attempts = this.listeners.get(player.runtimePlayerId);
     if (!attempts) {
       attempts = new Map();
@@ -310,15 +370,16 @@ export class MatchmakingService {
         if (attempts?.size === 0) {
           this.listeners.delete(player.runtimePlayerId);
         }
-        const queuedEntry = this.entriesByPlayer.get(player.runtimePlayerId);
-        if (queuedEntry?.attemptId === attemptId) {
-          this.removeEntry(queuedEntry);
-        }
+        this.scheduleTransportCleanup(player.runtimePlayerId, attemptId);
       }
     };
   }
 
   private removeEntry(entry: QueueEntry) {
+    this.cancelTransportCleanup(
+      entry.player.runtimePlayerId,
+      entry.attemptId,
+    );
     const key = queueKey(entry.intent, entry.difficulty);
     const queue = this.queues.get(key);
     if (queue) {
@@ -340,6 +401,7 @@ export class MatchmakingService {
     try {
       while (true) {
         const queue = this.queues.get(key);
+        if (queue) this.removeUnavailableEntries(queue);
         if (!queue || queue.length < 2) break;
         const pair = this.bestRankedPair(queue, this.now());
         if (!pair) break;
@@ -474,6 +536,68 @@ export class MatchmakingService {
     const timer = this.rankedReevaluationTimers.get(key);
     timer?.cancel();
     this.rankedReevaluationTimers.delete(key);
+  }
+
+  private removeUnavailableEntries(queue: QueueEntry[]) {
+    for (const entry of [...queue]) {
+      if (this.hasActiveDuel(entry.player)) this.removeEntry(entry);
+    }
+  }
+
+  private rememberCancelledAttempt(runtimePlayerId: string, attemptId: string) {
+    let attempts = this.cancelledAttempts.get(runtimePlayerId);
+    if (!attempts) {
+      attempts = new Set();
+      this.cancelledAttempts.set(runtimePlayerId, attempts);
+    }
+    attempts.add(attemptId);
+    while (attempts.size > 20) {
+      const oldest = attempts.values().next().value;
+      if (oldest === undefined) break;
+      attempts.delete(oldest);
+    }
+  }
+
+  private scheduleTransportCleanup(
+    runtimePlayerId: string,
+    attemptId: string,
+  ) {
+    this.cancelTransportCleanup(runtimePlayerId, attemptId);
+    const timer: { cancel: () => void } = { cancel: () => undefined };
+    let attempts = this.transportCleanupTimers.get(runtimePlayerId);
+    if (!attempts) {
+      attempts = new Map();
+      this.transportCleanupTimers.set(runtimePlayerId, attempts);
+    }
+    attempts.set(attemptId, timer);
+    timer.cancel = this.schedule(() => {
+      if (
+        this.transportCleanupTimers.get(runtimePlayerId)?.get(attemptId) !==
+        timer
+      ) {
+        return;
+      }
+      this.cancelTransportCleanup(runtimePlayerId, attemptId);
+      if (this.listeners.get(runtimePlayerId)?.get(attemptId)?.size) return;
+      const entry = this.entriesByPlayer.get(runtimePlayerId);
+      if (entry?.attemptId === attemptId) {
+        this.rememberCancelledAttempt(runtimePlayerId, attemptId);
+        this.removeEntry(entry);
+      }
+    }, this.transportGraceMs);
+  }
+
+  private cancelTransportCleanup(
+    runtimePlayerId: string,
+    attemptId: string,
+  ) {
+    const attempts = this.transportCleanupTimers.get(runtimePlayerId);
+    const timer = attempts?.get(attemptId);
+    timer?.cancel();
+    attempts?.delete(attemptId);
+    if (attempts?.size === 0) {
+      this.transportCleanupTimers.delete(runtimePlayerId);
+    }
   }
 
   private emit(

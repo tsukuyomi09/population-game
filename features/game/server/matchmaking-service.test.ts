@@ -163,9 +163,10 @@ test("intent and difficulty form separate compatibility queues", () => {
   );
 });
 
-test("leaving or losing the queue subscription removes the entry", () => {
+test("explicit leave removes immediately while a brief transport loss keeps the queue entry", () => {
   const duels = new FakeDuelFactory();
-  const service = new MatchmakingService(duels.create);
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, clock);
   const canceled = guest("canceled");
   const disconnected = guest("disconnected");
 
@@ -188,11 +189,18 @@ test("leaving or losing the queue subscription removes the entry", () => {
     () => undefined,
   );
   unsubscribe();
+  const reconnect = service.subscribe(
+    disconnected,
+    disconnectedAttempt.attemptId,
+    () => undefined,
+  );
+  clock.advanceTo(15_000);
   assert.equal(
     service.join(guest("real-replacement"), "DUEL", "REAL").status,
-    "WAITING",
+    "MATCHED",
   );
-  assert.equal(duels.matches.length, 0);
+  reconnect();
+  assert.equal(duels.matches.length, 1);
 });
 
 test("a waiting player receives one match even when subscribing after pairing", () => {
@@ -427,6 +435,7 @@ test("Ranked cancellation and disconnect cleanup remove timed queue entries", ()
     () => undefined,
   );
   unsubscribe();
+  clock.advanceTo(15_000);
   assert.equal(
     service.join(registered("real-replacement"), "RANKED", "REAL", 1_000)
       .status,
@@ -439,7 +448,8 @@ test("Ranked cancellation and disconnect cleanup remove timed queue entries", ()
 
 test("stale leave and disconnect cleanup cannot remove a newer queue attempt", () => {
   const duels = new FakeDuelFactory();
-  const service = new MatchmakingService(duels.create);
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, clock);
   const player = registered("churning");
 
   const oldAttempt = waiting(
@@ -456,6 +466,7 @@ test("stale leave and disconnect cleanup cannot remove a newer queue attempt", (
     service.join(player, "RANKED", "REAL", 1_000),
   );
   disconnectOldAttempt();
+  clock.advanceTo(15_000);
   assert.deepEqual(service.leave(player, oldAttempt.attemptId), {
     status: "LEFT",
     attemptId: oldAttempt.attemptId,
@@ -474,6 +485,90 @@ test("stale leave and disconnect cleanup cannot remove a newer queue attempt", (
   );
   assert.equal(opponentMatch.status, "MATCHED");
   assert.equal(duels.matches.length, 1);
+});
+
+test("cancel before an in-flight JOIN arrives tombstones that exact attempt", () => {
+  const duels = new FakeDuelFactory();
+  const service = new MatchmakingService(duels.create);
+  const player = guest("in-flight");
+  const attemptId = "client-attempt-1";
+
+  assert.deepEqual(service.leave(player, attemptId), {
+    status: "LEFT",
+    attemptId,
+  });
+  assert.deepEqual(
+    service.join(player, "DUEL", "EASY", undefined, attemptId),
+    { status: "LEFT", attemptId },
+  );
+  assert.equal(service.join(guest("opponent"), "DUEL", "EASY").status, "WAITING");
+  assert.equal(duels.matches.length, 0);
+});
+
+test("a client JOIN that never establishes SSE expires after transport grace", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, clock);
+  const abandonedJoin = guest("no-stream");
+
+  assert.equal(
+    service.join(
+      abandonedJoin,
+      "DUEL",
+      "EASY",
+      undefined,
+      "attempt-without-stream",
+    ).status,
+    "WAITING",
+  );
+  clock.advanceTo(15_000);
+  assert.equal(
+    service.join(
+      abandonedJoin,
+      "DUEL",
+      "EASY",
+      undefined,
+      "attempt-without-stream",
+    ).status,
+    "LEFT",
+  );
+  assert.equal(
+    service.join(guest("replacement"), "DUEL", "EASY").status,
+    "WAITING",
+  );
+  assert.equal(duels.matches.length, 0);
+});
+
+test("active Duel ownership rejects a second-tab queue for guests and members", () => {
+  const duels = new FakeDuelFactory();
+  const active = new Set(["guest-active", "member-active"]);
+  const service = new MatchmakingService(duels.create, {
+    hasActiveDuel: (player) => active.has(player.runtimePlayerId),
+  });
+
+  assert.throws(
+    () => service.join(guest("guest-active"), "DUEL", "EASY"),
+    /already in progress/,
+  );
+  assert.throws(
+    () => service.join(registered("member-active"), "RANKED", "REAL", 1_000),
+    /already in progress/,
+  );
+  assert.equal(duels.matches.length, 0);
+});
+
+test("an ownership change removes a stale queued candidate before pairing", () => {
+  const duels = new FakeDuelFactory();
+  const active = new Set<string>();
+  const service = new MatchmakingService(duels.create, {
+    hasActiveDuel: (player) => active.has(player.runtimePlayerId),
+  });
+  const stale = guest("became-active");
+
+  service.join(stale, "DUEL", "EASY");
+  active.add(stale.runtimePlayerId);
+  assert.equal(service.join(guest("new-player"), "DUEL", "EASY").status, "WAITING");
+  assert.equal(duels.matches.length, 0);
 });
 
 test("a match is delivered only to its queue attempt and remains until acknowledged", () => {

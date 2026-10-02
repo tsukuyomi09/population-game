@@ -75,6 +75,7 @@ export async function POST(request: Request) {
           intent,
           body.difficulty,
           rankedMmr,
+          matchmakingAttemptId(body.attemptId),
         ),
       );
     }

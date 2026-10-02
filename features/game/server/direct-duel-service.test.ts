@@ -110,9 +110,16 @@ function service(
     input: DirectDuelFinalizationInput,
   ) => Promise<DirectDuelFinalizationResult | void>,
 ) {
+  let nextDuelId = 1;
+  let nextInviteToken = 1;
   return new DirectDuelService({
-    generateDuelId: () => "duel-1",
-    generateInviteToken: () => "invite-token-123456",
+    generateDuelId: () => `duel-${nextDuelId++}`,
+    generateInviteToken: () => {
+      const tokenNumber = nextInviteToken++;
+      return tokenNumber === 1
+        ? "invite-token-123456"
+        : `invite-token-123456-${tokenNumber}`;
+    },
     generateTarget: () => 1_000,
     inviteTtlMs: 600_000,
     preGameDurationMs: 5_000,
@@ -267,7 +274,7 @@ test("Ranked invites require two registered players and start exactly once", () 
   assert.doesNotMatch(JSON.stringify(creatorEvents), /mmr/i);
 });
 
-test("matchmaking creates a Duel retrievable through the canonical runtime lookup", () => {
+test("matchmaking creates a Duel retrievable through the canonical runtime lookup", async () => {
   const runtime = new FakeRuntime();
   const duels = service(runtime);
   const canonicalDuels = () => duels;
@@ -280,6 +287,7 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
         difficulty,
         rated,
       ),
+    { hasActiveDuel: (player) => duels.hasActiveDuel(player) },
   );
   const first = registered("member-a");
   const second = registered("member-b");
@@ -292,6 +300,14 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
 
   assert.equal(created.status, "MATCHED");
   assert.equal(created.rated, true);
+  assert.deepEqual(duels.activeDuel(first), {
+    status: "ACTIVE",
+    duelId: created.duelId,
+    difficulty: "REAL",
+    rated: true,
+  });
+  matchmaking.acknowledgeMatch(first, created.attemptId, created.duelId);
+  assert.equal(duels.activeDuel(first).status, "ACTIVE");
   assert.equal(runtime.activeTimerCount(), 1);
   canonicalDuels().subscribe(created.duelId, first, (event) =>
     events.push(event),
@@ -310,6 +326,12 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
     1,
   );
 
+  await duels.abandon(created.duelId, first);
+  assert.equal(
+    matchmaking.join(second, "DUEL", "EASY").status,
+    "WAITING",
+  );
+
   assert.throws(
     () =>
       createMatchmadeDuel(
@@ -321,6 +343,89 @@ test("matchmaking creates a Duel retrievable through the canonical runtime looku
       ),
     /require registered players/,
   );
+});
+
+test("registered and guest identities own one active Duel across tabs", async () => {
+  for (const owner of [guest("guest-owner"), registered("member-owner")]) {
+    const runtime = new FakeRuntime();
+    const duels = service(runtime);
+    const opponent = guest(`${owner.runtimePlayerId}-opponent`);
+    const created = duels.create(owner, "EASY");
+    duels.join(opponent, created.duelId);
+
+    assert.deepEqual(duels.activeDuel(owner), {
+      status: "ACTIVE",
+      duelId: created.duelId,
+      difficulty: "EASY",
+      rated: false,
+    });
+    assert.throws(() => duels.create(owner, "REAL"), /already in progress/);
+    assert.throws(
+      () => duels.createInvite(owner, "EASY"),
+      /already in progress/,
+    );
+    const otherInvitation = duels.createInvite(
+      guest(`${owner.runtimePlayerId}-other-creator`),
+      "REAL",
+    );
+    assert.throws(
+      () => duels.joinInvite(owner, otherInvitation.inviteToken),
+      /already in progress/,
+    );
+
+    const matchmaking = new MatchmakingService(
+      () => ({ duelId: "should-not-start", rated: false }),
+      { hasActiveDuel: (player) => duels.hasActiveDuel(player) },
+    );
+    assert.throws(
+      () => matchmaking.join(owner, "DUEL", "REAL"),
+      /already in progress/,
+    );
+
+    await duels.abandon(created.duelId, owner);
+    assert.deepEqual(duels.activeDuel(owner), { status: "NONE" });
+    assert.equal(duels.create(owner, "REAL").status, "WAITING");
+  }
+});
+
+test("home recovery returns the same Duel and abandon releases it only after terminal state", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = registered("home-first");
+  const second = guest("home-second");
+  const invitation = duels.createInvite(first, "REAL");
+  duels.joinInvite(second, invitation.inviteToken);
+  const { duelId } = invitation;
+
+  const returnState = duels.activeDuel(first);
+  assert.equal(returnState.status, "ACTIVE");
+  assert.equal(returnState.status === "ACTIVE" && returnState.duelId, duelId);
+
+  await duels.abandon(duelId, first);
+  assert.deepEqual(duels.activeDuel(first), { status: "NONE" });
+  assert.deepEqual(duels.activeDuel(second), { status: "NONE" });
+});
+
+test("stale transport cleanup never releases active Duel ownership", () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("transport-first");
+  const second = guest("transport-second");
+  const { duelId } = duels.create(first, "EASY");
+  duels.join(second, duelId);
+
+  const disconnectOldStream = duels.subscribe(duelId, first, () => undefined);
+  disconnectOldStream();
+  assert.equal(duels.activeDuel(first).status, "ACTIVE");
+
+  duels.subscribe(duelId, first, () => undefined);
+  disconnectOldStream();
+  assert.deepEqual(duels.activeDuel(first), {
+    status: "ACTIVE",
+    duelId,
+    difficulty: "EASY",
+    rated: false,
+  });
 });
 
 test("Ranked invite abandon invokes terminal persistence exactly once", async () => {

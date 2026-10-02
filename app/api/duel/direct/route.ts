@@ -180,8 +180,14 @@ export async function POST(request: Request) {
 
 export async function GET(request: Request) {
   try {
-    const id = duelId(new URL(request.url).searchParams.get("duelId"));
+    const requestedDuelId = new URL(request.url).searchParams.get("duelId");
     const player = await currentRuntimePlayer(request);
+    if (!requestedDuelId) {
+      return Response.json(directDuels().activeDuel(player), {
+        headers: { "Cache-Control": "no-store" },
+      });
+    }
+    const id = duelId(requestedDuelId);
     const encoder = new TextEncoder();
     const pendingEvents: DirectDuelEvent[] = [];
     let controller: ReadableStreamDefaultController<Uint8Array> | undefined;

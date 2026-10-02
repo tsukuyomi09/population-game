@@ -1,7 +1,6 @@
 import type {
   MatchmakingEvent,
   MatchmakingIntent,
-  MatchmakingState,
 } from "./server/matchmaking-service";
 import type { GameDifficulty } from "./single-player";
 
@@ -27,12 +26,14 @@ async function postMatchmakingAction(body: Record<string, unknown>) {
 export async function requestMatchmakingJoin(
   intent: MatchmakingIntent,
   difficulty: GameDifficulty,
+  attemptId: string,
 ) {
   return (await postMatchmakingAction({
     action: "JOIN",
     intent,
     difficulty,
-  })) as MatchmakingState;
+    attemptId,
+  })) as MatchmakingEvent;
 }
 
 export async function requestMatchmakingLeave(attemptId: string) {

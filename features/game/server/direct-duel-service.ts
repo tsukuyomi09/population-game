@@ -78,6 +78,15 @@ export type DirectDuelPreGame = {
   endsAt: string;
 };
 
+export type ActiveDirectDuel =
+  | { status: "NONE" }
+  | {
+      status: "ACTIVE";
+      duelId: string;
+      difficulty: GameDifficulty;
+      rated: boolean;
+    };
+
 export type DirectDuelFinalizationInput = {
   runtimeGameId: string;
   difficulty: GameDifficulty;
@@ -267,6 +276,7 @@ function preGameDefinition(preGame: {
 export class DirectDuelService {
   private readonly sessions = new Map<string, DirectDuelSession>();
   private readonly invites = new Map<string, DirectDuelInvite>();
+  private readonly activeDuelIdsByPlayer = new Map<string, string>();
 
   constructor(private readonly options: DirectDuelServiceOptions) {
     if (
@@ -278,6 +288,7 @@ export class DirectDuelService {
   }
 
   create(player: RuntimePlayer, difficulty: GameDifficulty) {
+    this.assertCanStartDuel(player);
     const session = this.createSession(player, difficulty, "DUEL_ID", false);
 
     return {
@@ -309,6 +320,7 @@ export class DirectDuelService {
     difficulty: GameDifficulty,
     rated: boolean,
   ) {
+    this.assertCanStartDuel(player);
     const session = this.createSession(player, difficulty, "INVITE", rated);
     const inviteToken = this.options.generateInviteToken();
     if (this.invites.has(inviteToken)) {
@@ -377,6 +389,7 @@ export class DirectDuelService {
       throw new DirectDuelError("A Duel requires two distinct players.", 409);
     }
 
+    this.claimActiveDuel(session, [...session.players, player]);
     session.players.push(player);
     this.startGame(session);
 
@@ -424,6 +437,7 @@ export class DirectDuelService {
       );
     }
 
+    this.claimActiveDuel(session, [...session.players, player]);
     session.players.push(player);
     invite.usedByRuntimePlayerId = player.runtimePlayerId;
     const startedAt = this.options.now();
@@ -442,6 +456,33 @@ export class DirectDuelService {
     this.schedulePreGame(session);
 
     return this.inviteJoinedState(session, player);
+  }
+
+  activeDuel(player: RuntimePlayer): ActiveDirectDuel {
+    const duelId = this.activeDuelIdsByPlayer.get(player.runtimePlayerId);
+    if (!duelId) return { status: "NONE" };
+
+    const session = this.sessions.get(duelId);
+    if (!session || session.game?.snapshot().state === "COMPLETE") {
+      this.activeDuelIdsByPlayer.delete(player.runtimePlayerId);
+      return { status: "NONE" };
+    }
+
+    if (!session.players.some((candidate) => samePlayer(candidate, player))) {
+      this.activeDuelIdsByPlayer.delete(player.runtimePlayerId);
+      return { status: "NONE" };
+    }
+
+    return {
+      status: "ACTIVE",
+      duelId,
+      difficulty: session.difficulty,
+      rated: session.rated,
+    };
+  }
+
+  hasActiveDuel(player: RuntimePlayer) {
+    return this.activeDuel(player).status === "ACTIVE";
   }
 
   subscribe(
@@ -620,6 +661,7 @@ export class DirectDuelService {
   async abandon(duelId: string, player: RuntimePlayer) {
     const session = this.session(duelId);
     this.sessionPlayer(session, player);
+    if (!session.game && session.preGame) this.startGame(session);
     const game = session.game;
     if (!game) throw new DirectDuelError("The Duel has not started.", 409);
 
@@ -771,6 +813,9 @@ export class DirectDuelService {
     if (session.players.length !== 2) {
       throw new Error("A Duel requires two players before it can start.");
     }
+    this.claimActiveDuel(session, session.players);
+    session.cancelPreGameTimer?.();
+    session.cancelPreGameTimer = undefined;
 
     const game = new RuntimeGame({
       runtimeGameId: session.duelId,
@@ -1222,6 +1267,7 @@ export class DirectDuelService {
     session.cancelResultTimer?.();
     session.cancelResultTimer = undefined;
     this.cancelAllDisconnectTimers(session);
+    this.releaseActiveDuel(session);
     if (session.completionSent) return;
     if (session.finalizationPromise) return session.finalizationPromise;
 
@@ -1342,6 +1388,39 @@ export class DirectDuelService {
       throw new DirectDuelError("Player does not belong to this Duel.", 403);
     }
     return participant;
+  }
+
+  private assertCanStartDuel(player: RuntimePlayer, duelId?: string) {
+    const activeDuel = this.activeDuel(player);
+    if (activeDuel.status === "ACTIVE" && activeDuel.duelId !== duelId) {
+      throw new DirectDuelError(
+        "A match is already in progress for this player.",
+        409,
+      );
+    }
+  }
+
+  private claimActiveDuel(
+    session: DirectDuelSession,
+    players: readonly RuntimePlayer[],
+  ) {
+    for (const player of players) {
+      this.assertCanStartDuel(player, session.duelId);
+    }
+    for (const player of players) {
+      this.activeDuelIdsByPlayer.set(player.runtimePlayerId, session.duelId);
+    }
+  }
+
+  private releaseActiveDuel(session: DirectDuelSession) {
+    for (const player of session.players) {
+      if (
+        this.activeDuelIdsByPlayer.get(player.runtimePlayerId) ===
+        session.duelId
+      ) {
+        this.activeDuelIdsByPlayer.delete(player.runtimePlayerId);
+      }
+    }
   }
 }
 
