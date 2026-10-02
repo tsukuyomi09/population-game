@@ -36,6 +36,16 @@ type QueueEntry = {
   mmr: number | null;
 };
 
+type PendingMatchRecord = {
+  match: MatchmakingMatch;
+  player: RuntimePlayer;
+  cancelCleanupTimer: () => void;
+};
+
+type CancelledAttemptRecord = {
+  cancelCleanupTimer: () => void;
+};
+
 type CreateMatchmadeDuel = (
   firstPlayer: RuntimePlayer,
   secondPlayer: RuntimePlayer,
@@ -48,6 +58,9 @@ type MatchmakingServiceOptions = {
   schedule?: (callback: () => void, delayMs: number) => () => void;
   transportGraceMs?: number;
   hasActiveDuel?: (player: RuntimePlayer) => boolean;
+  matchedHandoffTtlMs?: number;
+  queueAttemptTtlMs?: number;
+  queueValidationIntervalMs?: number;
 };
 
 type RankedPair = {
@@ -65,6 +78,9 @@ const RANKED_SEARCH_STEPS = [
 ] as const;
 
 export const MAXIMUM_RANKED_MATCHMAKING_DIFFERENCE = 400;
+export const MATCHED_HANDOFF_TTL_MS = 15 * 60_000;
+export const QUEUE_ATTEMPT_TTL_MS = 30 * 60_000;
+export const QUEUE_VALIDATION_INTERVAL_MS = 60_000;
 
 export function rankedMatchmakingRange(waitTimeMs: number) {
   const elapsed = Math.max(0, waitTimeMs);
@@ -90,7 +106,7 @@ function queueKey(intent: MatchmakingIntent, difficulty: GameDifficulty) {
 export class MatchmakingService {
   private readonly queues = new Map<string, QueueEntry[]>();
   private readonly entriesByPlayer = new Map<string, QueueEntry>();
-  private readonly pendingMatches = new Map<string, MatchmakingMatch>();
+  private readonly pendingMatches = new Map<string, PendingMatchRecord>();
   private readonly listeners = new Map<
     string,
     Map<string, Set<(event: MatchmakingEvent) => void>>
@@ -103,7 +119,14 @@ export class MatchmakingService {
     string,
     Map<string, { cancel: () => void }>
   >();
-  private readonly cancelledAttempts = new Map<string, Set<string>>();
+  private readonly cancelledAttempts = new Map<
+    string,
+    Map<string, CancelledAttemptRecord>
+  >();
+  private readonly queueValidationTimers = new Map<
+    string,
+    { attemptId: string; cancel: () => void }
+  >();
   private readonly now: () => number;
   private readonly schedule: (
     callback: () => void,
@@ -112,6 +135,9 @@ export class MatchmakingService {
   private readonly transportGraceMs: number;
   private readonly hasActiveDuel: (player: RuntimePlayer) => boolean;
   private readonly tracksActiveDuelOwnership: boolean;
+  private readonly matchedHandoffTtlMs: number;
+  private readonly queueAttemptTtlMs: number;
+  private readonly queueValidationIntervalMs: number;
   private nextSequence = 0;
 
   constructor(
@@ -129,6 +155,22 @@ export class MatchmakingService {
     this.transportGraceMs = options.transportGraceMs ?? 15_000;
     this.tracksActiveDuelOwnership = Boolean(options.hasActiveDuel);
     this.hasActiveDuel = options.hasActiveDuel ?? (() => false);
+    this.matchedHandoffTtlMs =
+      options.matchedHandoffTtlMs ?? MATCHED_HANDOFF_TTL_MS;
+    this.queueAttemptTtlMs =
+      options.queueAttemptTtlMs ?? QUEUE_ATTEMPT_TTL_MS;
+    this.queueValidationIntervalMs =
+      options.queueValidationIntervalMs ?? QUEUE_VALIDATION_INTERVAL_MS;
+    if (
+      !Number.isFinite(this.matchedHandoffTtlMs) ||
+      this.matchedHandoffTtlMs <= 0 ||
+      !Number.isFinite(this.queueAttemptTtlMs) ||
+      this.queueAttemptTtlMs <= 0 ||
+      !Number.isFinite(this.queueValidationIntervalMs) ||
+      this.queueValidationIntervalMs <= 0
+    ) {
+      throw new Error("Matchmaking cleanup TTLs must be positive.");
+    }
   }
 
   join(
@@ -161,9 +203,9 @@ export class MatchmakingService {
     const pendingMatch = this.pendingMatches.get(player.runtimePlayerId);
     if (pendingMatch) {
       if (!this.tracksActiveDuelOwnership || this.hasActiveDuel(player)) {
-        return pendingMatch;
+        return pendingMatch.match;
       }
-      this.pendingMatches.delete(player.runtimePlayerId);
+      this.removePendingMatch(player.runtimePlayerId, pendingMatch);
     }
 
     if (this.hasActiveDuel(player)) {
@@ -220,6 +262,7 @@ export class MatchmakingService {
       queue.push(entry);
       this.queues.set(key, queue);
       this.entriesByPlayer.set(player.runtimePlayerId, entry);
+      this.scheduleQueueValidation(entry);
       this.reevaluateRankedQueue(key);
 
       if (
@@ -231,7 +274,7 @@ export class MatchmakingService {
 
       const match = this.pendingMatches.get(player.runtimePlayerId);
       if (match) {
-        return match;
+        return match.match;
       }
       return {
         status: "WAITING",
@@ -248,6 +291,7 @@ export class MatchmakingService {
       queue.push(entry);
       this.queues.set(key, queue);
       this.entriesByPlayer.set(player.runtimePlayerId, entry);
+      this.scheduleQueueValidation(entry);
       if (requestedAttemptId) {
         this.scheduleTransportCleanup(player.runtimePlayerId, entry.attemptId);
       }
@@ -260,6 +304,7 @@ export class MatchmakingService {
     }
 
     this.entriesByPlayer.delete(opponent.player.runtimePlayerId);
+    this.cancelQueueValidation(opponent);
     if (queue.length === 0) this.queues.delete(key);
 
     let created;
@@ -274,6 +319,7 @@ export class MatchmakingService {
       queue.unshift(opponent);
       this.queues.set(key, queue);
       this.entriesByPlayer.set(opponent.player.runtimePlayerId, opponent);
+      this.scheduleQueueValidation(opponent);
       throw error;
     }
 
@@ -289,8 +335,8 @@ export class MatchmakingService {
       ...opponentMatch,
       attemptId: entry.attemptId,
     };
-    this.pendingMatches.set(opponent.player.runtimePlayerId, opponentMatch);
-    this.pendingMatches.set(player.runtimePlayerId, playerMatch);
+    this.storePendingMatch(opponent.player, opponentMatch);
+    this.storePendingMatch(player, playerMatch);
     this.emit(
       opponent.player.runtimePlayerId,
       opponent.attemptId,
@@ -302,7 +348,7 @@ export class MatchmakingService {
 
   leave(player: RuntimePlayer, attemptId: string): MatchmakingEvent {
     const match = this.pendingMatches.get(player.runtimePlayerId);
-    if (match?.attemptId === attemptId) return match;
+    if (match?.match.attemptId === attemptId) return match.match;
 
     const entry = this.entriesByPlayer.get(player.runtimePlayerId);
     if (entry?.attemptId !== attemptId) {
@@ -323,11 +369,11 @@ export class MatchmakingService {
     duelId: string,
   ) {
     const match = this.pendingMatches.get(player.runtimePlayerId);
-    if (!match || match.attemptId !== attemptId) return;
-    if (match.duelId !== duelId) {
+    if (!match || match.match.attemptId !== attemptId) return;
+    if (match.match.duelId !== duelId) {
       throw new MatchmakingError("Matchmaking result does not match.", 409);
     }
-    this.pendingMatches.delete(player.runtimePlayerId);
+    this.removePendingMatch(player.runtimePlayerId, match);
   }
 
   subscribe(
@@ -348,7 +394,7 @@ export class MatchmakingService {
     }
     playerListeners.add(listener);
 
-    const pendingMatch = this.pendingMatches.get(player.runtimePlayerId);
+    const pendingMatch = this.pendingMatches.get(player.runtimePlayerId)?.match;
     const entry = this.entriesByPlayer.get(player.runtimePlayerId);
     if (pendingMatch?.attemptId === attemptId) {
       listener(pendingMatch);
@@ -380,6 +426,7 @@ export class MatchmakingService {
       entry.player.runtimePlayerId,
       entry.attemptId,
     );
+    this.cancelQueueValidation(entry);
     const key = queueKey(entry.intent, entry.difficulty);
     const queue = this.queues.get(key);
     if (queue) {
@@ -476,6 +523,8 @@ export class MatchmakingService {
         pair.second.player.runtimePlayerId,
         pair.second,
       );
+      this.scheduleQueueValidation(pair.first);
+      this.scheduleQueueValidation(pair.second);
       throw error;
     }
 
@@ -488,7 +537,7 @@ export class MatchmakingService {
         difficulty: pair.first.difficulty,
         rated: created.rated,
       };
-      this.pendingMatches.set(entry.player.runtimePlayerId, match);
+      this.storePendingMatch(entry.player, match);
       this.emit(entry.player.runtimePlayerId, entry.attemptId, match);
     }
   }
@@ -500,6 +549,7 @@ export class MatchmakingService {
       if (this.entriesByPlayer.get(entry.player.runtimePlayerId) === entry) {
         this.entriesByPlayer.delete(entry.player.runtimePlayerId);
       }
+      this.cancelQueueValidation(entry);
     }
   }
 
@@ -547,14 +597,29 @@ export class MatchmakingService {
   private rememberCancelledAttempt(runtimePlayerId: string, attemptId: string) {
     let attempts = this.cancelledAttempts.get(runtimePlayerId);
     if (!attempts) {
-      attempts = new Set();
+      attempts = new Map();
       this.cancelledAttempts.set(runtimePlayerId, attempts);
     }
-    attempts.add(attemptId);
+    attempts.get(attemptId)?.cancelCleanupTimer();
+    const record: CancelledAttemptRecord = {
+      cancelCleanupTimer: () => undefined,
+    };
+    attempts.set(attemptId, record);
+    record.cancelCleanupTimer = this.schedule(() => {
+      const currentAttempts = this.cancelledAttempts.get(runtimePlayerId);
+      if (currentAttempts?.get(attemptId) !== record) return;
+      currentAttempts.delete(attemptId);
+      if (currentAttempts.size === 0) {
+        this.cancelledAttempts.delete(runtimePlayerId);
+      }
+    }, this.queueAttemptTtlMs);
     while (attempts.size > 20) {
-      const oldest = attempts.values().next().value;
-      if (oldest === undefined) break;
-      attempts.delete(oldest);
+      const oldest = attempts.entries().next().value as
+        | [string, CancelledAttemptRecord]
+        | undefined;
+      if (!oldest) break;
+      oldest[1].cancelCleanupTimer();
+      attempts.delete(oldest[0]);
     }
   }
 
@@ -598,6 +663,110 @@ export class MatchmakingService {
     if (attempts?.size === 0) {
       this.transportCleanupTimers.delete(runtimePlayerId);
     }
+  }
+
+  private storePendingMatch(
+    player: RuntimePlayer,
+    match: MatchmakingMatch,
+  ) {
+    const existing = this.pendingMatches.get(player.runtimePlayerId);
+    if (existing) {
+      this.removePendingMatch(player.runtimePlayerId, existing);
+    }
+    const record: PendingMatchRecord = {
+      match,
+      player,
+      cancelCleanupTimer: () => undefined,
+    };
+    this.pendingMatches.set(player.runtimePlayerId, record);
+    this.schedulePendingMatchCleanup(record);
+  }
+
+  private schedulePendingMatchCleanup(record: PendingMatchRecord) {
+    record.cancelCleanupTimer();
+    record.cancelCleanupTimer = this.schedule(() => {
+      const runtimePlayerId = record.player.runtimePlayerId;
+      if (this.pendingMatches.get(runtimePlayerId) !== record) return;
+      if (
+        this.tracksActiveDuelOwnership &&
+        this.hasActiveDuel(record.player)
+      ) {
+        this.schedulePendingMatchCleanup(record);
+        return;
+      }
+      this.removePendingMatch(runtimePlayerId, record);
+    }, this.matchedHandoffTtlMs);
+  }
+
+  private removePendingMatch(
+    runtimePlayerId: string,
+    record: PendingMatchRecord,
+  ) {
+    if (this.pendingMatches.get(runtimePlayerId) !== record) return;
+    record.cancelCleanupTimer();
+    this.pendingMatches.delete(runtimePlayerId);
+  }
+
+  private scheduleQueueValidation(entry: QueueEntry) {
+    this.cancelQueueValidation(entry);
+    const timer: { attemptId: string; cancel: () => void } = {
+      attemptId: entry.attemptId,
+      cancel: () => undefined,
+    };
+    this.queueValidationTimers.set(entry.player.runtimePlayerId, timer);
+    timer.cancel = this.schedule(() => {
+      if (
+        this.queueValidationTimers.get(entry.player.runtimePlayerId) !== timer ||
+        this.entriesByPlayer.get(entry.player.runtimePlayerId) !== entry
+      ) {
+        return;
+      }
+
+      if (this.hasActiveDuel(entry.player)) {
+        this.rememberCancelledAttempt(
+          entry.player.runtimePlayerId,
+          entry.attemptId,
+        );
+        this.removeEntry(entry);
+        this.emit(entry.player.runtimePlayerId, entry.attemptId, {
+          status: "LEFT",
+          attemptId: entry.attemptId,
+        });
+        return;
+      }
+
+      const hasListeners = Boolean(
+        this.listeners
+          .get(entry.player.runtimePlayerId)
+          ?.get(entry.attemptId)?.size,
+      );
+      const hasTransportGrace = this.transportCleanupTimers
+        .get(entry.player.runtimePlayerId)
+        ?.has(entry.attemptId);
+      if (
+        this.now() - entry.joinedAt >= this.queueAttemptTtlMs &&
+        !hasListeners &&
+        !hasTransportGrace
+      ) {
+        this.rememberCancelledAttempt(
+          entry.player.runtimePlayerId,
+          entry.attemptId,
+        );
+        this.removeEntry(entry);
+        return;
+      }
+
+      this.scheduleQueueValidation(entry);
+    }, this.queueValidationIntervalMs);
+  }
+
+  private cancelQueueValidation(entry: QueueEntry) {
+    const timer = this.queueValidationTimers.get(
+      entry.player.runtimePlayerId,
+    );
+    if (timer?.attemptId !== entry.attemptId) return;
+    timer.cancel();
+    this.queueValidationTimers.delete(entry.player.runtimePlayerId);
   }
 
   private emit(

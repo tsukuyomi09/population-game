@@ -171,12 +171,14 @@ type DirectDuelSession = {
   >;
   completionSent?: boolean;
   finalizationPromise?: Promise<void>;
+  cancelCleanupTimer?: () => void;
 };
 
 type DirectDuelInvite = {
   duelId: string;
   expiresAt: Date;
   usedByRuntimePlayerId?: string;
+  cancelCleanupTimer?: () => void;
 };
 
 type DirectDuelDisconnect = {
@@ -195,8 +197,11 @@ type DirectDuelServiceOptions = {
   finalWindowMs: number;
   resultPhaseDurationMs: number;
   disconnectTimeoutMs: number;
+  terminalSessionTtlMs: number;
+  usedInviteTtlMs: number;
   now: () => Date;
   schedule: (callback: () => void, delayMs: number) => () => void;
+  scheduleCleanup: (callback: () => void, delayMs: number) => () => void;
   finalizeDuel?: (
     input: DirectDuelFinalizationInput,
   ) => Promise<DirectDuelFinalizationResult | void>;
@@ -285,6 +290,14 @@ export class DirectDuelService {
     ) {
       throw new Error("Duel disconnect timeout must be positive.");
     }
+    if (
+      !Number.isFinite(options.terminalSessionTtlMs) ||
+      options.terminalSessionTtlMs <= 0 ||
+      !Number.isFinite(options.usedInviteTtlMs) ||
+      options.usedInviteTtlMs <= 0
+    ) {
+      throw new Error("Duel cleanup TTLs must be positive.");
+    }
   }
 
   create(player: RuntimePlayer, difficulty: GameDifficulty) {
@@ -331,10 +344,12 @@ export class DirectDuelService {
     const expiresAt = new Date(
       this.options.now().getTime() + this.options.inviteTtlMs,
     );
-    this.invites.set(inviteToken, {
+    const invite: DirectDuelInvite = {
       duelId: session.duelId,
       expiresAt,
-    });
+    };
+    this.invites.set(inviteToken, invite);
+    this.scheduleInviteCleanup(inviteToken, invite, expiresAt);
 
     return {
       duelId: session.duelId,
@@ -408,7 +423,7 @@ export class DirectDuelService {
     );
 
     if (invite.expiresAt.getTime() <= this.options.now().getTime()) {
-      this.invites.delete(inviteToken);
+      this.removeInvite(inviteToken, invite);
       throw new DirectDuelError("This invite has expired.", 410);
     }
 
@@ -440,6 +455,17 @@ export class DirectDuelService {
     this.claimActiveDuel(session, [...session.players, player]);
     session.players.push(player);
     invite.usedByRuntimePlayerId = player.runtimePlayerId;
+    const usedInviteExpiresAt = new Date(
+      Math.min(
+        invite.expiresAt.getTime(),
+        this.options.now().getTime() + this.options.usedInviteTtlMs,
+      ),
+    );
+    this.scheduleInviteCleanup(
+      inviteToken,
+      invite,
+      usedInviteExpiresAt,
+    );
     const startedAt = this.options.now();
     session.preGame = {
       startedAt,
@@ -1322,6 +1348,7 @@ export class DirectDuelService {
       }
       this.sendCompletion(session, snapshot, finalizationResult);
       session.completionSent = true;
+      this.scheduleTerminalSessionCleanup(session);
     })();
 
     session.finalizationPromise = finalization;
@@ -1421,6 +1448,76 @@ export class DirectDuelService {
         this.activeDuelIdsByPlayer.delete(player.runtimePlayerId);
       }
     }
+  }
+
+  private scheduleInviteCleanup(
+    inviteToken: string,
+    invite: DirectDuelInvite,
+    cleanupAt: Date,
+  ) {
+    invite.cancelCleanupTimer?.();
+    const delayMs = Math.max(
+      0,
+      cleanupAt.getTime() - this.options.now().getTime(),
+    );
+    invite.cancelCleanupTimer = this.options.scheduleCleanup(() => {
+      if (this.invites.get(inviteToken) !== invite) return;
+      if (this.options.now() < cleanupAt) {
+        this.scheduleInviteCleanup(inviteToken, invite, cleanupAt);
+        return;
+      }
+      this.removeInvite(inviteToken, invite);
+    }, delayMs);
+  }
+
+  private removeInvite(inviteToken: string, invite: DirectDuelInvite) {
+    if (this.invites.get(inviteToken) !== invite) return;
+    invite.cancelCleanupTimer?.();
+    invite.cancelCleanupTimer = undefined;
+    this.invites.delete(inviteToken);
+
+    const session = this.sessions.get(invite.duelId);
+    if (
+      session?.joinKind === "INVITE" &&
+      !session.game &&
+      !session.preGame &&
+      session.players.length === 1 &&
+      !session.players.some(
+        (player) =>
+          this.activeDuelIdsByPlayer.get(player.runtimePlayerId) ===
+          session.duelId,
+      )
+    ) {
+      this.sessions.delete(session.duelId);
+      session.listeners.clear();
+    }
+  }
+
+  private scheduleTerminalSessionCleanup(session: DirectDuelSession) {
+    session.cancelCleanupTimer?.();
+    const timer: { cancel: () => void } = { cancel: () => undefined };
+    session.cancelCleanupTimer = () => timer.cancel();
+    timer.cancel = this.options.scheduleCleanup(() => {
+      if (this.sessions.get(session.duelId) !== session) return;
+      const snapshot = session.game?.snapshot();
+      if (
+        snapshot?.state !== "COMPLETE" ||
+        !session.completionSent ||
+        session.finalizationPromise
+      ) {
+        return;
+      }
+
+      session.cancelCleanupTimer = undefined;
+      this.sessions.delete(session.duelId);
+      for (const [inviteToken, invite] of this.invites) {
+        if (invite.duelId === session.duelId) {
+          this.removeInvite(inviteToken, invite);
+        }
+      }
+      session.listeners.clear();
+      session.completionEvents?.clear();
+    }, this.options.terminalSessionTtlMs);
   }
 }
 

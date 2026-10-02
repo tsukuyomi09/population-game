@@ -539,6 +539,31 @@ test("a client JOIN that never establishes SSE expires after transport grace", (
   assert.equal(duels.matches.length, 0);
 });
 
+test("cancel tombstones expire with the queue-attempt TTL", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, {
+    now: clock.now,
+    schedule: clock.schedule,
+    queueAttemptTtlMs: 100,
+    queueValidationIntervalMs: 25,
+  });
+  const player = guest("expired-cancel");
+  const attemptId = "expired-cancel-attempt";
+  service.leave(player, attemptId);
+
+  clock.advanceTo(99);
+  assert.equal(
+    service.join(player, "DUEL", "EASY", undefined, attemptId).status,
+    "LEFT",
+  );
+  clock.advanceTo(100);
+  assert.equal(
+    service.join(player, "DUEL", "EASY", undefined, attemptId).status,
+    "WAITING",
+  );
+});
+
 test("active Duel ownership rejects a second-tab queue for guests and members", () => {
   const duels = new FakeDuelFactory();
   const active = new Set(["guest-active", "member-active"]);
@@ -569,6 +594,161 @@ test("an ownership change removes a stale queued candidate before pairing", () =
   active.add(stale.runtimePlayerId);
   assert.equal(service.join(guest("new-player"), "DUEL", "EASY").status, "WAITING");
   assert.equal(duels.matches.length, 0);
+});
+
+test("unacknowledged MATCHED handoffs expire after their TTL", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, {
+    now: clock.now,
+    schedule: clock.schedule,
+    matchedHandoffTtlMs: 100,
+    queueValidationIntervalMs: 25,
+  });
+  const first = guest("handoff-first");
+  const firstAttempt = waiting(service.join(first, "DUEL", "EASY"));
+  service.join(guest("handoff-second"), "DUEL", "EASY");
+
+  clock.advanceTo(99);
+  const beforeExpiry: MatchmakingEvent[] = [];
+  service.subscribe(first, firstAttempt.attemptId, (event) => {
+    beforeExpiry.push(event);
+  });
+  assert.equal(beforeExpiry.at(-1)?.status, "MATCHED");
+
+  clock.advanceTo(100);
+  const afterExpiry: MatchmakingEvent[] = [];
+  service.subscribe(first, firstAttempt.attemptId, (event) => {
+    afterExpiry.push(event);
+  });
+  assert.equal(afterExpiry.at(-1)?.status, "LEFT");
+});
+
+test("MATCHED handoff cleanup renews while its Duel remains active", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const active = new Set<string>();
+  const service = new MatchmakingService(
+    (first, second, difficulty, rated) => {
+      const created = duels.create(first, second, difficulty, rated);
+      active.add(first.runtimePlayerId);
+      active.add(second.runtimePlayerId);
+      return created;
+    },
+    {
+      now: clock.now,
+      schedule: clock.schedule,
+      hasActiveDuel: (player) => active.has(player.runtimePlayerId),
+      matchedHandoffTtlMs: 100,
+      queueValidationIntervalMs: 25,
+    },
+  );
+  const first = guest("active-handoff-first");
+  const second = guest("active-handoff-second");
+  const firstAttempt = waiting(service.join(first, "DUEL", "REAL"));
+  service.join(second, "DUEL", "REAL");
+
+  clock.advanceTo(150);
+  const whileActive: MatchmakingEvent[] = [];
+  service.subscribe(first, firstAttempt.attemptId, (event) => {
+    whileActive.push(event);
+  });
+  assert.equal(whileActive.at(-1)?.status, "MATCHED");
+
+  active.clear();
+  clock.advanceTo(200);
+  const afterTerminal: MatchmakingEvent[] = [];
+  service.subscribe(first, firstAttempt.attemptId, (event) => {
+    afterTerminal.push(event);
+  });
+  assert.equal(afterTerminal.at(-1)?.status, "LEFT");
+});
+
+test("queue TTL removes orphaned attempts but retains connected current attempts", () => {
+  const staleDuels = new FakeDuelFactory();
+  const staleClock = new FakeClock();
+  const staleService = new MatchmakingService(staleDuels.create, {
+    now: staleClock.now,
+    schedule: staleClock.schedule,
+    queueAttemptTtlMs: 100,
+    queueValidationIntervalMs: 25,
+  });
+  staleService.join(guest("orphaned"), "DUEL", "EASY");
+  staleClock.advanceTo(100);
+  assert.equal(
+    staleService.join(guest("orphan-replacement"), "DUEL", "EASY").status,
+    "WAITING",
+  );
+  assert.equal(staleDuels.matches.length, 0);
+
+  const activeDuels = new FakeDuelFactory();
+  const activeClock = new FakeClock();
+  const activeService = new MatchmakingService(activeDuels.create, {
+    now: activeClock.now,
+    schedule: activeClock.schedule,
+    queueAttemptTtlMs: 100,
+    queueValidationIntervalMs: 25,
+  });
+  const connected = guest("connected-current");
+  const connectedAttempt = waiting(
+    activeService.join(connected, "DUEL", "REAL"),
+  );
+  activeService.subscribe(connected, connectedAttempt.attemptId, () => undefined);
+  activeClock.advanceTo(500);
+  assert.equal(
+    activeService.join(guest("connected-opponent"), "DUEL", "REAL").status,
+    "MATCHED",
+  );
+  assert.equal(activeDuels.matches.length, 1);
+});
+
+test("queue validation removes attempts invalidated by active Duel ownership", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const active = new Set<string>();
+  const service = new MatchmakingService(duels.create, {
+    now: clock.now,
+    schedule: clock.schedule,
+    hasActiveDuel: (player) => active.has(player.runtimePlayerId),
+    queueAttemptTtlMs: 1_000,
+    queueValidationIntervalMs: 25,
+  });
+  const stale = guest("ownership-stale");
+  service.join(stale, "DUEL", "EASY");
+  active.add(stale.runtimePlayerId);
+
+  clock.advanceTo(25);
+  assert.equal(
+    service.join(guest("ownership-replacement"), "DUEL", "EASY").status,
+    "WAITING",
+  );
+  assert.equal(duels.matches.length, 0);
+});
+
+test("stale queue validation callbacks cannot remove a newer attempt", () => {
+  const duels = new FakeDuelFactory();
+  const clock = new FakeClock();
+  const service = new MatchmakingService(duels.create, {
+    now: clock.now,
+    schedule: (callback, delayMs) => {
+      clock.schedule(callback, delayMs);
+      return () => undefined;
+    },
+    queueAttemptTtlMs: 1_000,
+    queueValidationIntervalMs: 25,
+  });
+  const player = guest("validation-churn");
+  const oldAttempt = waiting(service.join(player, "DUEL", "EASY"));
+  service.leave(player, oldAttempt.attemptId);
+  const currentAttempt = waiting(service.join(player, "DUEL", "REAL"));
+  service.subscribe(player, currentAttempt.attemptId, () => undefined);
+
+  clock.advanceTo(25);
+  assert.equal(
+    service.join(guest("validation-opponent"), "DUEL", "REAL").status,
+    "MATCHED",
+  );
+  assert.equal(duels.matches.length, 1);
 });
 
 test("a match is delivered only to its queue attempt and remains until acknowledged", () => {

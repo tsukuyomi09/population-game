@@ -56,20 +56,32 @@ class FakeRuntime {
   private timers: Array<{
     callback: () => void;
     cancelled: boolean;
+    kind: "GAME" | "CLEANUP";
     runsAt: Date;
   }> = [];
 
-  schedule = (callback: () => void, delayMs: number) => {
+  private scheduleTimer(
+    kind: "GAME" | "CLEANUP",
+    callback: () => void,
+    delayMs: number,
+  ) {
     const timer = {
       callback,
       cancelled: false,
+      kind,
       runsAt: new Date(this.now.getTime() + delayMs),
     };
     this.timers.push(timer);
     return () => {
       timer.cancelled = true;
     };
-  };
+  }
+
+  schedule = (callback: () => void, delayMs: number) =>
+    this.scheduleTimer("GAME", callback, delayMs);
+
+  scheduleCleanup = (callback: () => void, delayMs: number) =>
+    this.scheduleTimer("CLEANUP", callback, delayMs);
 
   moveTo(value: string | Date) {
     this.now = new Date(value);
@@ -84,7 +96,9 @@ class FakeRuntime {
     const timer = this.timers
       .filter(
         (candidate) =>
-          !candidate.cancelled && candidate.runsAt.getTime() <= this.now.getTime(),
+          !candidate.cancelled &&
+          candidate.kind === "GAME" &&
+          candidate.runsAt.getTime() <= this.now.getTime(),
       )
       .sort((left, right) => left.runsAt.getTime() - right.runsAt.getTime())[0];
     assert.ok(timer);
@@ -93,14 +107,36 @@ class FakeRuntime {
   }
 
   activeTimerCount() {
-    return this.timers.filter((timer) => !timer.cancelled).length;
+    return this.timers.filter(
+      (timer) => !timer.cancelled && timer.kind === "GAME",
+    ).length;
   }
 
   activeTimerTimes() {
     return this.timers
       .filter((timer) => !timer.cancelled)
+      .filter((timer) => timer.kind === "GAME")
       .map((timer) => timer.runsAt.toISOString())
       .sort();
+  }
+
+  fireCleanupTimersThrough(value: string | Date) {
+    this.moveTo(value);
+    while (true) {
+      const timer = this.timers
+        .filter(
+          (candidate) =>
+            !candidate.cancelled &&
+            candidate.kind === "CLEANUP" &&
+            candidate.runsAt.getTime() <= this.now.getTime(),
+        )
+        .sort(
+          (left, right) => left.runsAt.getTime() - right.runsAt.getTime(),
+        )[0];
+      if (!timer) return;
+      timer.cancelled = true;
+      timer.callback();
+    }
   }
 }
 
@@ -127,8 +163,11 @@ function service(
     finalWindowMs: 10_000,
     resultPhaseDurationMs: 10_000,
     disconnectTimeoutMs: 120_000,
+    terminalSessionTtlMs: 900_000,
+    usedInviteTtlMs: 300_000,
     now: () => new Date(runtime.now),
     schedule: runtime.schedule,
+    scheduleCleanup: runtime.scheduleCleanup,
     finalizeDuel,
   });
 }
@@ -424,6 +463,81 @@ test("stale transport cleanup never releases active Duel ownership", () => {
     status: "ACTIVE",
     duelId,
     difficulty: "EASY",
+    rated: false,
+  });
+});
+
+test("terminal Duel sessions remain replayable until the 15-minute TTL", async () => {
+  const runtime = new FakeRuntime();
+  const duels = service(runtime);
+  const first = guest("terminal-first");
+  const second = guest("terminal-second");
+  const { duelId } = duels.create(first, "EASY");
+  duels.join(second, duelId);
+
+  runtime.fireCleanupTimersThrough(
+    new Date(runtime.now.getTime() + 900_000),
+  );
+  assert.equal(duels.activeDuel(first).status, "ACTIVE");
+
+  await duels.abandon(duelId, first);
+  const completedAt = new Date(runtime.now);
+  const replayed: DirectDuelEvent[] = [];
+  duels.subscribe(duelId, second, (event) => replayed.push(event));
+  assert.equal(replayed.at(-1)?.type, "game_completed");
+
+  runtime.fireCleanupTimersThrough(
+    new Date(completedAt.getTime() + 899_999),
+  );
+  assert.doesNotThrow(() =>
+    duels.subscribe(duelId, second, () => undefined),
+  );
+
+  runtime.fireCleanupTimersThrough(
+    new Date(completedAt.getTime() + 900_000),
+  );
+  assert.throws(
+    () => duels.subscribe(duelId, second, () => undefined),
+    /not found/,
+  );
+});
+
+test("invite cleanup removes expired or used tokens without removing an active Duel", () => {
+  const unusedRuntime = new FakeRuntime();
+  const unusedDuels = service(unusedRuntime);
+  const unusedCreator = guest("unused-creator");
+  const unused = unusedDuels.createInvite(unusedCreator, "EASY");
+  unusedRuntime.fireCleanupTimersThrough(unused.inviteExpiresAt);
+
+  assert.throws(
+    () => unusedDuels.joinInvite(guest("unused-joiner"), unused.inviteToken),
+    /not found/,
+  );
+  assert.throws(
+    () =>
+      unusedDuels.subscribe(unused.duelId, unusedCreator, () => undefined),
+    /not found/,
+  );
+
+  const usedRuntime = new FakeRuntime();
+  const usedDuels = service(usedRuntime);
+  const first = guest("used-first");
+  const second = guest("used-second");
+  const used = usedDuels.createInvite(first, "REAL");
+  usedDuels.joinInvite(second, used.inviteToken);
+  const usedAt = new Date(usedRuntime.now);
+  usedRuntime.fireCleanupTimersThrough(
+    new Date(usedAt.getTime() + 300_000),
+  );
+
+  assert.throws(
+    () => usedDuels.joinInvite(second, used.inviteToken),
+    /not found/,
+  );
+  assert.deepEqual(usedDuels.activeDuel(first), {
+    status: "ACTIVE",
+    duelId: used.duelId,
+    difficulty: "REAL",
     rated: false,
   });
 });

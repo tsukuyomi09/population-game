@@ -14,8 +14,10 @@ const DIRECT_DUEL_FINAL_WINDOW_MS = 10_000;
 const DIRECT_DUEL_RESULT_PHASE_DURATION_MS = 10_000;
 const DIRECT_DUEL_DISCONNECT_TIMEOUT_MS = 120_000;
 const DIRECT_DUEL_INVITE_TTL_MS = 10 * 60_000;
+const DIRECT_DUEL_USED_INVITE_TTL_MS = 5 * 60_000;
+const DIRECT_DUEL_TERMINAL_SESSION_TTL_MS = 15 * 60_000;
 const DIRECT_DUEL_PRE_GAME_DURATION_MS = 5_000;
-export const DIRECT_DUEL_API_VERSION = 8;
+export const DIRECT_DUEL_API_VERSION = 9;
 
 const globalForDirectDuels = globalThis as typeof globalThis & {
   worldrawingDirectDuels?: DirectDuelService;
@@ -38,9 +40,16 @@ export function directDuels() {
       finalWindowMs: DIRECT_DUEL_FINAL_WINDOW_MS,
       resultPhaseDurationMs: DIRECT_DUEL_RESULT_PHASE_DURATION_MS,
       disconnectTimeoutMs: DIRECT_DUEL_DISCONNECT_TIMEOUT_MS,
+      terminalSessionTtlMs: DIRECT_DUEL_TERMINAL_SESSION_TTL_MS,
+      usedInviteTtlMs: DIRECT_DUEL_USED_INVITE_TTL_MS,
       now: () => new Date(),
       schedule: (callback, delayMs) => {
         const timer = setTimeout(callback, delayMs);
+        return () => clearTimeout(timer);
+      },
+      scheduleCleanup: (callback, delayMs) => {
+        const timer = setTimeout(callback, delayMs);
+        timer.unref();
         return () => clearTimeout(timer);
       },
       finalizeDuel: finalizeRankedDuel,
